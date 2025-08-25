@@ -1,0 +1,5 @@
+.env
+ML_Research/**
+.chromadb_store/**
+__pycache__/**
+*.pyc
