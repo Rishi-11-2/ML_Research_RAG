@@ -9,7 +9,6 @@ peft
 pydantic
 trl
 sentence-transformers
-chromadb
 tiktoken
 pymupdf
 qdrant-client

@@ -2,11 +2,10 @@ import os
 import numpy as np
 from typing import List, Tuple
 import re
-import chromadb
+# import chromadb
 import numpy as np
 
 from dotenv import load_dotenv
-import litellm
 from litellm import completion
 from sentence_transformers import SentenceTransformer, CrossEncoder , util
 from qdrant_client import QdrantClient
@@ -23,8 +22,8 @@ hf_token = os.getenv("HF_TOKEN")
 OPEN_ROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 os.environ["OPENROUTER_API_KEY"] = OPEN_ROUTER_API_KEY
 
-client = chromadb.PersistentClient(path="./.chromadb_store")
-collection = client.get_collection(name="document_chunks")
+# client = chromadb.PersistentClient(path="./.chromadb_store")
+# collection = client.get_collection(name="document_chunks")
 
 embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
