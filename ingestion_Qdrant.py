@@ -31,13 +31,17 @@ import httpx
 from docling.document_converter import DocumentConverter
 from docling.chunking import HybridChunker
 
+
+
+from dotenv import load_dotenv
+
 # ----------------- CONFIG (tweak these) -----------------
 # Local project / doc locations
 PDF_DIR = "/kaggle/input/ml-papers/papers"
 
 # Qdrant config (prefer environment overrides)
-QDRANT_URL = "https://580519c7-9811-4dce-ab59-f0f34e12ee23.eu-west-2-0.aws.cloud.qdrant.io:6333"
-QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.6JYzEqerJZP0H2p2t1w6XmTygk7QzJ4QqujTQv59jMY"
+QDRANT_URL = os.environ.get("QDRANT_URL")
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "document_chunks")
 
 # Embedding model

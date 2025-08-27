@@ -11,13 +11,13 @@ from litellm import completion
 from sentence_transformers import SentenceTransformer, CrossEncoder , util
 from qdrant_client import QdrantClient
 
+load_dotenv()
 
-QDRANT_URL = os.environ.get("QDRANT_URL", "https://580519c7-9811-4dce-ab59-f0f34e12ee23.eu-west-2-0.aws.cloud.qdrant.io:6333")
+QDRANT_URL = os.environ.get("QDRANT_URL")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "document_chunks")
-QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.6JYzEqerJZP0H2p2t1w6XmTygk7QzJ4QqujTQv59jMY")
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
 
 #--------------------------
-load_dotenv()
 # -----------------------
 hf_token = os.getenv("HF_TOKEN")
 OPEN_ROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
