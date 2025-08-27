@@ -3,3 +3,5 @@ ML_Research/**
 .chromadb_store/**
 __pycache__/**
 *.pyc
+papers/
+papers_temp/
