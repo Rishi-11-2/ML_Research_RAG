@@ -28,6 +28,12 @@ try:
 except Exception:
     tqdm = None
 
+# Try to import a PDF metadata reader; if unavailable, we'll skip title extraction.
+try:
+    from PyPDF2 import PdfReader
+except Exception:
+    PdfReader = None
+
 
 def safe_filename(name: str) -> str:
     """Sanitize filename to remove unsafe characters."""
@@ -71,6 +77,51 @@ def ensure_pdf_extension(name: str) -> str:
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
     return name
+
+
+def _extract_pdf_title(path: str):
+    """
+    Try to read the PDF metadata title using PyPDF2 (if available).
+    Returns a sanitized filename (without path) or None.
+    """
+    if PdfReader is None:
+        return None
+    try:
+        reader = PdfReader(path)
+        # PyPDF2 metadata is available at reader.metadata in newer versions
+        meta = getattr(reader, "metadata", None)
+        title = None
+        if meta:
+            # meta may be an object with attributes or a dict-like mapping
+            # Try common accessors
+            title = getattr(meta, "title", None)
+            if not title:
+                # meta might be a dictionary with keys like '/Title'
+                try:
+                    title = meta.get("/Title") if isinstance(meta, dict) else None
+                except Exception:
+                    title = None
+        # As a fallback, some PDFs expose documentInfo
+        if not title and hasattr(reader, "documentInfo"):
+            try:
+                dinfo = reader.documentInfo
+                if dinfo:
+                    title = getattr(dinfo, "title", None)
+                    if not title:
+                        try:
+                            title = dinfo.get("/Title") if isinstance(dinfo, dict) else None
+                        except Exception:
+                            title = None
+            except Exception:
+                title = None
+        if title:
+            title = str(title).strip()
+            if title:
+                return safe_filename(title)
+    except Exception:
+        # any error reading PDF metadata -> ignore and fallback
+        return None
+    return None
 
 
 def download_pdf(url: str, dest_dir: str, session: requests.Session, timeout: int = 20, retries: int = 3, backoff: float = 1.0):
@@ -132,14 +183,27 @@ def download_pdf(url: str, dest_dir: str, session: requests.Session, timeout: in
                 tmpname = tmpf.name
 
             # very simple sanity check: ensure file isn't ridiculously small
-            if os.path.getsize(tmpname) < 1024:  # <1KB
+            tmp_size = os.path.getsize(tmpname)
+            if tmp_size < 1024:  # <1KB
                 # maybe not a pdf; try again or fail
                 os.remove(tmpname)
-                msg = f"Downloaded file too small ({os.path.getsize(tmpname)} bytes)."
+                msg = f"Downloaded file too small ({tmp_size} bytes)."
                 if attempt < retries:
                     time.sleep(backoff * attempt)
                     continue
                 return (url, None, False, msg)
+
+            # Try to extract title from PDF metadata and use it as filename if present
+            title_name = _extract_pdf_title(tmpname)
+            if title_name:
+                # create filename from title
+                fname_from_title = ensure_pdf_extension(title_name)
+                dest_path = os.path.join(dest_dir, fname_from_title)
+                base, ext = os.path.splitext(dest_path)
+                counter = 1
+                while os.path.exists(dest_path):
+                    dest_path = f"{base}__{counter}{ext}"
+                    counter += 1
 
             # final move
             shutil.move(tmpname, dest_path)
@@ -228,9 +292,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download PDF files from URLs into a directory.")
     parser.add_argument("--input", "-i", required=True, help="Path to text file containing PDF URLs (one per line).")
     parser.add_argument("--dest", "-d", default="./papers", help="Destination directory (default ./papers).")
-    parser.add_argument("--workers", "-w", type=int, default=4, help="Parallel downloads (default 4). Set 1 to disable concurrency.")
-    parser.add_argument("--timeout", type=int, default=30, help="Per-request timeout seconds (default 30).")
-    parser.add_argument("--retries", type=int, default=3, help="Number of retries on failure (default 3).")
+    parser.add_argument("--workers", "-w", type=int, default=10, help="Parallel downloads (default 4). Set 1 to disable concurrency.")
+    parser.add_argument("--timeout", type=int, default=30, help="Per-request timeout seconds (default 10).")
+    parser.add_argument("--retries", type=int, default=3, help="Number of retries on failure (default 5).")
     parser.add_argument("--backoff", type=float, default=1.0, help="Backoff multiplier between retries (default 1.0).")
     parser.add_argument("--user-agent", default="pdf-downloader/1.0 (+https://example.com)", help="User-Agent header.")
     parser.add_argument("--no-progress", dest="show_progress", action="store_false", help="Disable tqdm progress bar if installed.")

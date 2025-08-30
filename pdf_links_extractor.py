@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 from datetime import datetime
 import math
+import re
 
 ARXIV_NS = '{http://www.w3.org/2005/Atom}'
 ARXIV_EXT = '{http://arxiv.org/schemas/atom}'
@@ -61,7 +62,40 @@ class ArxivMLFinder:
         ]
         self.now_year = datetime.now().year
 
-    def search_arxiv(self, query: str, max_results: int = 50) -> List[Paper]:
+
+    def count_syllables(self,word):
+        """Simple heuristic to count syllables in a word."""
+        word = word.lower()
+        count = 0
+        vowels = "aeiouy"
+        if word[0] in vowels:
+            count += 1
+        for index in range(1, len(word)):
+            if word[index] in vowels and word[index - 1] not in vowels:
+                count += 1
+        if word.endswith("e"):
+            count -= 1
+        if count == 0:
+            count += 1
+        return count
+
+    def flesch_kincaid_grade(self,text):
+        """Calculate Flesch-Kincaid grade level for readability."""
+        sentences = re.split(r'[.!?]+', text)
+        num_sentences = len([s for s in sentences if s.strip()])
+        if num_sentences == 0:
+            return 0
+        words = re.findall(r'\w+', text)
+        num_words = len(words)
+        if num_words == 0:
+            return 0
+        num_syllables = sum(self.count_syllables(word) for word in words)
+        asl = num_words / num_sentences  # average sentence length
+        asw = num_syllables / num_words  # average syllables per word
+        grade = 0.39 * asl + 11.8 * asw - 15.59
+        return grade
+
+    def search_arxiv(self, query: str, max_results: int = 100) -> List[Paper]:
         """Search arXiv API and return parsed Paper objects.
         The query is used in the arXiv "all:" search field (safe for simple queries).
         """
@@ -135,61 +169,80 @@ class ArxivMLFinder:
             return []
 
     def score_paper(self, paper: Paper) -> float:
-        """Simple heuristic scoring for arXiv ML papers. Higher is better."""
+        """Improved heuristic scoring for arXiv ML papers to assess quality more accurately. Higher is better."""
         score = 0.0
 
-        # recency: prefer last 3 years heavily, last 5 years moderately
+        # Recency: exponential decay for better granularity
         age = max(0, self.now_year - paper.year)
-        if age <= 1:
-            score += 25
-        elif age <= 3:
-            score += 18
-        elif age <= 5:
-            score += 10
-        else:
-            score += max(0, 5 - math.log1p(age))  # small credit for older classics
+        score += 25 * math.exp(-0.5 * age)  # decays slower for recent, faster for old
 
-        # abstract length (very short abstracts often indicate posters or low-detail submissions)
-        abs_len = len(paper.abstract.split())
-        if abs_len >= 150:
+        # Abstract length and quality
+        abs_text = paper.abstract
+        abs_words = len(abs_text.split())
+        if abs_words >= 200:
+            score += 10
+        elif abs_words >= 150:
             score += 8
-        elif abs_len >= 80:
+        elif abs_words >= 100:
             score += 5
 
-        # journal_ref or comment indicating acceptance/publication adds large boost
+        # Readability: prefer readable abstracts (grade 12-18 for research papers)
+        readability = self.flesch_kincaid_grade(abs_text)
+        if 12 <= readability <= 18:
+            score += 8
+        elif 10 <= readability <= 20:
+            score += 4
+
+        # Journal ref or publication boost, expanded conference list
+        confs = [
+            'neurips', 'icml', 'iclr', 'cvpr', 'iccv', 'eccv', 'aaai', 'acl', 'emnlp',
+            'nature', 'science', 'kdd', 'ijcai', 'sigir', 'www', 'icra', 'iros', 'rss',
+            'colt', 'uai', 'aistats'
+        ]
         if paper.journal_ref:
             score += 20
-            # if journal_ref mentions known conference/journal, add more
-            confs = ['neurips', 'icml', 'iclr', 'cvpr', 'iccv', 'eccv', 'aaai', 'acl', 'emnlp', 'nature', 'science']
-            jr = paper.journal_ref.lower()
+            jr_lower = paper.journal_ref.lower()
             for c in confs:
-                if c in jr:
-                    score += 12
+                if c in jr_lower:
+                    score += 15  # increased boost for top venues
                     break
 
+        # Comment indicating acceptance or additional quality signals
         if paper.comment:
-            com = paper.comment.lower()
-            # common phrases: 'accepted at', 'to appear in', 'in proceedings of'
-            if 'accepted' in com or 'to appear' in com or 'to appear in' in com or 'in proceedings' in com:
-                score += 10
+            com_lower = paper.comment.lower()
+            acceptance_phrases = ['accepted', 'to appear', 'in proceedings', 'camera-ready', 'oral', 'spotlight', 'best paper']
+            if any(phrase in com_lower for phrase in acceptance_phrases):
+                score += 12  # increased from 10
 
-        # category boost if in allowed ML categories
+        # Category boost, assuming self.allowed_categories is list of ML cats like 'cs.LG', 'stat.ML'
         if any(cat in self.allowed_categories for cat in paper.categories):
             score += 8
 
-        # strong keyword matches in title or abstract
-        text = (paper.title + '\n' + paper.abstract).lower()
-        kw_hits = 0
-        for kw in self.strong_keywords:
-            if kw in text:
-                kw_hits += 1
-        score += min(20, kw_hits * 6)
+        # Strong keyword matches, with expanded list if possible
+        text_lower = (paper.title + '\n' + abs_text).lower()
+        # Assume self.strong_keywords exists; add more for quality signals
+        additional_keywords = ['novel', 'state-of-the-art', 'sota', 'benchmark', 'large-scale', 'reproducible', 'open-source', 'empirical study', 'theoretical analysis']
+        all_keywords = self.strong_keywords + additional_keywords
+        kw_hits = sum(1 for kw in all_keywords if kw in text_lower)
+        score += min(25, kw_hits * 5)  # adjusted for more hits
 
-        # author count: collaborative papers sometimes indicate larger study
-        if len(paper.authors) >= 3:
+        # Reproducibility signals
+        repro_signals = ['github', 'code available', 'repository', 'supplementary material', 'dataset released']
+        if any(sig in text_lower or (paper.comment and sig in com_lower) for sig in repro_signals):
+            score += 10
+
+        # Author count: more collaborative, but cap
+        num_authors = len(paper.authors)
+        if num_authors >= 5:
+            score += 5
+        elif num_authors >= 3:
             score += 3
 
-        return round(score, 2)
+        # Survey or review boost
+        if 'survey' in text_lower or 'review' in text_lower:
+            score += 10  # often high-quality overviews
+
+        return round(score, 2)  
 
     def filter_and_rank(self, papers: List[Paper], min_score: float = 20.0) -> List[Paper]:
         """Score, filter by threshold, remove duplicates, and return sorted list."""
@@ -237,15 +290,114 @@ def main():
         'diffusion models image generation',
         'contrastive learning',
         'reinforcement learning deep',
-        'computer vision object detection segmentation'
+        'computer vision object detection segmentation',
+        'Supervised learning',
+        'Unsupervised learning',
+        'Semi-supervised learning',
+        'Self-supervised learning',
+        'Representation learning',
+        'Feature learning',
+        'Contrastive learning',
+        'Metric learning',
+        'Embedding learning',
+        'Deep learning',
+        'Convolutional neural networks',
+        'Recurrent neural networks',
+        'Transformers',
+        'Attention mechanisms',
+        'Graph neural networks',
+        'Variational autoencoders',
+        'Generative adversarial networks',
+        'Normalizing flows',
+        'Diffusion models',
+        'Autoregressive models',
+        'Sequence-to-sequence models',
+        'Language modeling',
+        'Multilingual modeling',            
+        'Few-shot learning',
+        'Zero-shot learning',
+        'Meta-learning',
+        'Transfer learning',
+        'Domain adaptation',
+        'Domain generalization',
+        'Continual learning',
+        'Lifelong learning',
+        'Reinforcement learning',
+        'Deep reinforcement learning',
+        'Inverse reinforcement learning',
+        'Imitation learning',
+        'Multi-agent reinforcement learning',
+        'Causal inference in ML',
+        'Bayesian deep learning',
+        'Probabilistic modeling',
+        'Uncertainty estimation',
+        'Out-of-distribution detection',
+        'Adversarial attacks',
+        'Adversarial defenses',
+        'Adversarial robustness',
+        'Fairness in ML',
+        'Bias mitigation',
+        'Explainability',
+        'Interpretability',
+        'Model probing',
+        'Rationale generation',
+        'Optimization algorithms',
+        'Adaptive optimizers',
+        'Second-order optimization',
+        'Learning rate schedules',
+        'Regularization techniques',
+        'Normalization methods',
+        'Dropout techniques',
+        'Sparse models',
+        'Neural architecture search',
+        'AutoML',
+        'Model compression',
+        'Quantization',
+        'Pruning',
+        'Knowledge distillation',
+        'Efficient transformer architectures',
+        'Sparse attention',
+        'Long-context modeling',
+        'Memory-augmented networks',
+        'Scalable distributed training',
+        'Mixed-precision training',
+        'Curriculum learning',
+        'Active learning',
+        'Data augmentation',
+        'Synthetic data generation',
+        'Data labeling strategies',
+        'Human-in-the-loop learning',
+        'Benchmarking and evaluation metrics',
+        'Dataset curation',
+        'Dataset bias analysis',
+        'Privacy-preserving ML' ,
+        'Differential privacy',
+        'Federated learning',
+        'Representation disentanglement',
+        'Information-theoretic approaches',
+        'Graph representation learning',
+        'Temporal modeling',
+        'Time-series forecasting',
+        'Multimodal learning',
+        'Cross-modal retrieval',
+        'Vision-language modeling',
+        'Speech recognition',
+        'Speech synthesis',
+        'Audio representation learning',
+        'Video understanding',
+        'Image classification',
+        'Object detection',
+        'Image segmentation',
+        'Anomaly detection',
+        'Survival analysis'
+
     ]
 
     all_papers = []
     for q in queries:
-        papers = finder.search_arxiv(q, max_results=50)
+        papers = finder.search_arxiv(q)
         all_papers.extend(papers)
-        # be polite to the arXiv API
-        time.sleep(1)
+        # time.sleep(1)
 
     # Score and filter. Tune min_score if you want more/fewer results.
     good = finder.filter_and_rank(all_papers, min_score=50.0)
