@@ -272,7 +272,7 @@ class ArxivMLFinder:
         print(f"💾 Saving {len(papers)} arXiv links to '{filename}'")
         with open(filename, 'w', encoding='utf-8') as f:
             for p in papers:
-                f.write(f"{p.pdf_url}\n")
+                f.write(f"{p.pdf_url}  Title : {p.title}   \n")
         print("✅ Done saving links.")
 
 
