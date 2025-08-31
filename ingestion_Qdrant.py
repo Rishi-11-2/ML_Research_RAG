@@ -18,7 +18,7 @@ import uuid
 import time
 import math
 from typing import List, Dict, Any, Optional
-
+from dotenv import load_dotenv
 import tiktoken
 from sentence_transformers import SentenceTransformer
 
@@ -37,7 +37,8 @@ from dotenv import load_dotenv
 
 # ----------------- CONFIG (tweak these) -----------------
 # Local project / doc locations
-PDF_DIR = "/kaggle/input/ml-papers/papers"
+PDF_DIR = "./papers"
+load_dotenv()
 
 # Qdrant config (prefer environment overrides)
 QDRANT_URL = os.environ.get("QDRANT_URL")
@@ -58,8 +59,8 @@ MAX_CHUNK_CHARS = int(os.environ.get("MAX_CHUNK_CHARS", 600))
 CHUNK_CHAR_OVERLAP = int(os.environ.get("CHUNK_CHAR_OVERLAP", 100))
 
 # batching
-EMBED_BATCH_SIZE = int(os.environ.get("EMBED_BATCH_SIZE", 128))   # docs per embed batch
-QDRANT_UPSERT_BATCH = int(os.environ.get("QDRANT_UPSERT_BATCH", 512))  # points per upsert
+EMBED_BATCH_SIZE = int(os.environ.get("EMBED_BATCH_SIZE", 256))   # docs per embed batch
+QDRANT_UPSERT_BATCH = int(os.environ.get("QDRANT_UPSERT_BATCH", 256))  # points per upsert
 
 # safety
 MAX_CHUNKS_PER_PDF = int(os.environ.get("MAX_CHUNKS_PER_PDF", 200_000))
@@ -246,7 +247,7 @@ def main():
     print(f"Found {len(pdf_files)} PDFs to ingest in {PDF_DIR}.")
 
     # initialize qdrant client
-    prefer_grpc = QDRANT_URL.startswith("grpc://") or QDRANT_URL.startswith("http://localhost")
+    prefer_grpc = False
     client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() if QDRANT_API_KEY else None), prefer_grpc=prefer_grpc)
 
     # Prepare local tools
