@@ -238,7 +238,7 @@ class ContextManager:
         short_term_max_turns: int = 8,
         memory_max_items: int = 200,
         token_budget: int = 3000,
-        retrieve_k: int = 20,
+        retrieve_k: int = 50,
         include_memory_last_n: int = 6,
     ):
         self.call_vector_db = call_vector_db
@@ -276,22 +276,20 @@ class ContextManager:
         self.add_turn("user", user_text)
 
         # 2) retrieve
-        retrieved = self.retrieve(user_text, k=self.retrieve_k, filter_meta=filter_meta)
-        # 3) pick top-N to include in prompt (we will refine ordering via rerank if present)
-        top_candidates = retrieved[: max(1, min(len(retrieved), 6))]
+        candidates = self.retrieve(user_text, k=self.retrieve_k, filter_meta=filter_meta)
 
-        # 4) build prompt
-        prompt = self.build_prompt(user_text, top_candidates)
+        # 3) build prompt
+        prompt = self.build_prompt(user_text, candidates)
 
-        # 5) call LLM
+        # 4) call LLM
 
         answer = self.llm_call(prompt)
 
-        # 6) record assistant turn
+        # 5) record assistant turn
         self.add_turn("assistant", answer)
 
-        # used_chunks = [{"id": c.get("id")} for c in top_candidates]
-        return {"answer": answer, "used_chunks": None, "prompt": prompt}
+        used_chunks = [{"id": c.get("id")} for c in candidates]
+        return {"answer": answer, "used_chunks": used_chunks, "prompt": prompt}
 
     def retrieve(self, query: str, k: int = 50, filter_meta: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
@@ -324,7 +322,7 @@ class ContextManager:
         retrieved_parts = []
         for c in retrieved:
             meta = c.get("metadata", {}) or {}
-            title = meta.get("paper_title") or meta.get("source") or "unknown"
+            title = meta.get("source") or "unknown"
             preview = meta.get("preview", "")
             header = f"[{title} {preview}]"
             retrieved_parts.append(header + "\n" + (c.get("text") or ""))
