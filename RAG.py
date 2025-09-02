@@ -8,7 +8,7 @@ import numpy as np
 from dotenv import load_dotenv
 from litellm import completion
 from sentence_transformers import SentenceTransformer, CrossEncoder , util
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient , models
 
 load_dotenv()
 
@@ -109,36 +109,51 @@ def cross_encoder_rerank(query: str, docs: List, top_k: int = 5) -> List[dict]:
 
 def call_vector_db(query: str, k: int) -> List[dict]:
     """
-    Query Qdrant and return a list of dicts:
-      [{'text': ..., 'score': ..., 'metadata': {...}, 'vector': ...}, ...]
-    This version returns score as similarity (higher is better) since Qdrant uses cosine similarity.
-    Note: There is no 'score' in the stored payload; it's computed during search.
-    The 'vectors' refers to the embedded vector stored with each point, which can be included if needed.
-    emb_gen.embed is used to generate the query vector before searching.
+    
+
+    uses the dense and sparse vectors, with their results combined
+    using the Reciprocal Rank Fusion.
     """
-    # Embed the query using emb_gen (assuming emb_gen is initialized as in the ingestion script)
     query_vec = embedder.encode([query])[0]
     client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_grpc=False)
-
     # Search Qdrant
-    results = client.search(
+    results = client.query_points(
         collection_name=QDRANT_COLLECTION,
-        query_vector=query_vec,
+        query=query_vec, 
         limit=k,
-        with_vectors=False  
+        with_vectors=False,
+        # using = "late-interaction",
+        # prefetch=sparse_dene_rrf_prefetch,
     )
-
+    # print(results)
     out = []
-    for i, hit in enumerate(results):
-        payload = hit.payload or {}
-        text = payload.get('text', '')
-        meta = {k: v for k, v in payload.items() if k != 'text'}
+
+    points_list = getattr(results, "points", None) or results
+
+    for hit in points_list:
+        # --- support object-like hits (ScoredPoint) ---
+        payload = getattr(hit, "payload", None) or {}
+        score = getattr(hit, "score", None)
+        pid = getattr(hit, "id", None)
+
+        text = payload.get("text")
+        meta = {k: v for k, v in payload.items() if k not in ("text", "preview", "source", "_stable_id")}
+
+        source = payload.get("source")
+        score_f = float(score) if score is not None else None
+
+
+        pid_str = payload.get("_stable_id")
+
+        # print(pid_str, meta,score_f)
         out.append({
-            "id": payload.get("_stable_id", None),
+            "id": pid_str,
+            "source":source,
             "text": text,
-            "score": float(hit.score) if hit.score is not None else None,
+            "score": score_f,
             "metadata": meta,
         })
+
     return out
 
 #---------------------------
@@ -148,7 +163,7 @@ def llm_call(prompt: str) -> str:
     messages = [
     {"role": "system", "content": "You are an expert assistant. Use ONLY the provided context for factual claims and cite sources. But don't say 'based on the context'. Give  a detailed answer based on the provided context ."},
     {"role": "user", "content": prompt}
-     ]
+    ]
     resp = completion(
         model="openrouter/z-ai/glm-4.5-air:free",
         messages=messages,
@@ -210,33 +225,24 @@ def rag_query(query: str, final_k: int = 3, candidate_k: int = 50) -> str:
     3) build context using top final_k
     4) send to LLM
     """
-    # fetch many candidates from chroma (bigger pool -> better reranking)
+    # fetch many candidates from chroma/qdrant (bigger pool -> better reranking)
     candidates = call_vector_db(query, candidate_k)
     if not candidates:
         raise ValueError("No documents returned from Chroma DB")
 
     # rerank
-    
+    # print(candidat)
     reranked = cross_encoder_rerank(query, candidates, top_k=final_k)
 
     # Build context text -> preserve ordering and include score for debugging if wanted
-    context = "\n\n".join(f"[{i+1}] {doc}" for i, (doc, score) in enumerate(reranked))
+    context = "\n\n".join(f"[{i+1}] {doc}" for i, doc in enumerate(reranked))
 
-    messages = [
-        {
-            "role": "system",
-            "content": "You are an expert assistant. Use only the context provided to answer the question. But don't say 'based on the context' . "
-        },
-        {
-            "role": "user",
-            "content": f"Context:\n{context}\n\nQuestion: {query}"
-        }
-    ]
-
-    resp = llm_call(messages)
+   
+    context = f"context:{context}, query : {query}"
+    resp = llm_call(context)
     return resp
 
 if __name__ == "__main__":
     # q = "How can we explain the whole process of FDB mathematically?"
-    q = "I want to make a neural network for efficient image classification , how?"
+    q = "what is U-NET?"
     print(rag_query(q, final_k=3, candidate_k=50))

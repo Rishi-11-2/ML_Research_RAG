@@ -23,7 +23,7 @@ class ContextManager:
         short_term_max_turns: int = 8,
         memory_max_items: int = 200,
         token_budget: int = 3000,
-        retrieve_k: int = 12,
+        retrieve_k: int = 100,
         include_memory_last_n: int = 6,
     ):
         self.call_vector_db = call_vector_db
@@ -61,12 +61,10 @@ class ContextManager:
         self.add_turn("user", user_text)
 
         # 2) retrieve
-        retrieved = self.retrieve(user_text, k=self.retrieve_k, filter_meta=filter_meta)
-        # 3) pick top-N to include in prompt (we will refine ordering via rerank if present)
-        top_candidates = retrieved[: max(1, min(len(retrieved), 6))]
+        candidates = self.retrieve(user_text, k=self.retrieve_k, filter_meta=filter_meta)
 
         # 4) build prompt
-        prompt = self.build_prompt(user_text, top_candidates)
+        prompt = self.build_prompt(user_text, candidates)
 
         # 5) call LLM
 
@@ -76,13 +74,12 @@ class ContextManager:
         self.add_turn("assistant", answer)
 
         # used_chunks = [{"id": c.get("id")} for c in top_candidates]
-        return {"answer": answer, "used_chunks": None, "prompt": prompt}
+        return {"answer": answer, "used_chunks": candidates, "prompt": prompt}
 
     def retrieve(self, query: str, k: Optional[int] = None, filter_meta: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         Fetch k candidates from vector DB 
         """
-        k = k or self.retrieve_k
         
         candidates  = self.call_vector_db(query,k)
 
@@ -102,18 +99,19 @@ class ContextManager:
           2) drop retrieved chunks one-by-one (lowest priority last)
           3) truncate retrieved chunk texts
         """
-        system = "SYSTEM: You are an expert assistant. Use ONLY the provided context for factual claims and cite sources.But don't say 'based on the context'."
+        system = "SYSTEM: You are an expert assistant. Use ONLY the provided context for factual claims and cite sources.But don't say 'based on the context'. Be verbatim on context"
 
         recent_block = "\n".join(f"{t['role']}: {t['text']}" for t in self.short_history[-self.short_term_max_turns:])
         memory_block = "\n".join(m['summary'] for m in self.long_memory[-self.include_memory_last_n:]) if self.long_memory else ""
 
         retrieved_parts = []
         for c in retrieved:
-            meta = c.get("metadata", {}) or {}
-            title =  meta.get("source") or "unknown"
-            preview = meta.get("preview", "")
-            header = f"[{title}— {preview}]"
-            retrieved_parts.append(header + "\n" + (c.get("text") or ""))
+            score  = c.get("score")
+            meta = c.get("metadata"),
+            title = meta.get("source")
+            header = f"[{title}]"
+            text = c.get("text")
+            retrieved_parts.append(f"header :{header} + score:{score} + metadata:{metadata} + text:{text}")
 
         parts = [
             "SYSTEM:\n" + system,
@@ -319,7 +317,6 @@ class ContextManager:
           2) drop retrieved chunks one-by-one (lowest priority last)
           3) truncate retrieved chunk texts
         """
-        system = "SYSTEM: You are an expert assistant. Use ONLY the provided context for factual claims and cite sources.But don't say 'based on the context'."
 
         recent_block = "\n".join(f"{t['role']}: {t['text']}" for t in self.short_history[-self.short_term_max_turns:])
         memory_block = "\n".join(m['summary'] for m in self.long_memory[-self.include_memory_last_n:]) if self.long_memory else ""
@@ -332,9 +329,7 @@ class ContextManager:
             header = f"[{title} {preview}]"
             retrieved_parts.append(header + "\n" + (c.get("text") or ""))
 
-        parts = [
-            "SYSTEM:\n" + system,
-        ]
+        parts = []
         if memory_block:
             parts.append("LONG_TERM_MEMORY:\n" + memory_block)
         if recent_block:
