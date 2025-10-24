@@ -72,40 +72,6 @@ def cross_encoder_rerank(query: str, docs: List, top_k: int = 5) -> List[dict]:
         })
     return results
 
-#----------------------------
-
-# def call_vector_db(query: str, k: int) -> List[dict]:
-#     """
-#     Query chroma and return a list of dicts:
-#       [{'text': ..., 'score': ..., 'metadata': {...}}, ...]
-#     This version DOES NOT request "ids" from Chroma (some client versions reject it).
-#     """
-#     # ask for documents and metadatas (and optionally distances if useful)
-#     result = collection.query(
-#         query_texts=[query],
-#         n_results=k,
-#         include=["documents", "metadatas", "distances"]  # <-- no "ids"
-#     )
-
-#     # safe extraction (chroma returns nested lists for batched queries)
-#     docs = result.get("documents", [[]])[0] if result.get("documents") else []
-#     metadatas = result.get("metadatas", [[]])[0] if result.get("metadatas") else [{}] * len(docs)
-#     distances = result.get("distances", [[]])[0] if result.get("distances") else [None] * len(docs)
-
-#     out = []
-#     for i, doc in enumerate(docs):
-#         meta = metadatas[i] if i < len(metadatas) else {}
-#         dist = distances[i] if i < len(distances) else None
-#         out.append({
-#             "id": i,
-#             "text": doc,
-#             "score": float(dist) if dist is not None else None,
-#             "metadata": meta or {}
-#         })
-#     return out
-
-
-
 
 def call_vector_db(query: str, k: int) -> List[dict]:
     """
