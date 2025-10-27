@@ -7,9 +7,22 @@ from context_manager import ContextManager
 from langchain_core.messages import HumanMessage, AIMessage
 import os
 from dotenv import load_dotenv
-
-
+import requests
+INGESTION_SERVICE_URL = os.getenv('INGESTION_SERVICE_URL')
 load_dotenv()
+def trigger_remote_ingestion(query: str, timeout: float = 10.0) -> None:
+    """
+    Fire-and-forget POST to ingestion service. Fails silently (logs to stdout).
+    Minimal: does NOT update st.session_state or show anything to users.
+    """
+    url = INGESTION_SERVICE_URL + "/enqueue"
+    headers = {}
+
+    try:
+        requests.post(url, json={"query": query}, headers=headers, timeout=timeout)
+    except Exception as e:
+        # don't raise or show to user — just log for operator debugging
+        print(f"[WARN] trigger_remote_ingestion failed: {e}", flush=True)
 
 # --- Model and Context Manager Setup ---
 
@@ -110,3 +123,10 @@ if query := st.chat_input("Enter your query"):
             )
         except Exception as e:
             st.warning(f"Failed to save history to context manager: {e}")
+        
+
+        try:
+            trigger_remote_ingestion(query)
+        except Exception as e:
+            # never show to user; just log for operator debugging
+            print(f"[WARN] trigger_remote_ingestion threw: {e}", flush=True)

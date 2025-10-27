@@ -47,7 +47,10 @@ class ContextManager:
         summary_threshold: int = 8,
         token_budget: int = 3000,
         retrieve_k: int = 50,
-        system_prompt: str = "You are an expert assistant. Use ONLY the provided context for factual claims. No need to give scores",
+        system_prompt: str = '''You are an expert assistant whose goal is to answer the question clearly and concisely. 
+        Use ONLY the provided context for factual claims. 
+        No need to give scores.
+        Also no need to say given the context, just respond naturally'''
     ):
         self.call_vector_db = call_vector_db
         self.llm_call = llm_call
