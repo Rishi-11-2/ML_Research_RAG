@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 import os
 from dotenv import load_dotenv
 import requests
-INGESTION_SERVICE_URL = os.getenv('INGESTION_SERVICE_URL')
+INGESTION_SERVICE_URL = 'https://ingestion-service-zlt7.onrender.com'
 load_dotenv()
 def trigger_remote_ingestion(query: str, timeout: float = 10.0) -> None:
     """
