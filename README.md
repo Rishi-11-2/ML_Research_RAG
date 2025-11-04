@@ -150,7 +150,7 @@ print(result["answer"])
 ---
 
 
-## Qdrant DB
+## Qdrant DB CRON JOB
 
 weekly cron jobs are performed in which top-5 ML research papers are ingested into vector database. This ensures that
 the latest information is available to the LLM and also enhances the user experience
