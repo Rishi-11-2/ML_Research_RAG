@@ -138,50 +138,6 @@ def llm_call(prompt: str) -> str:
 
 #------------------------------
 
-def summarize_conversation(conversation_text, num_sentences=10):
-    """
-    Summarizes a conversation provided as a single string using extractive summarization with sentence embeddings from a lightweight model.
-    This uses 'all-MiniLM-L6-v2', a fast and light SentenceTransformer model (runs on CPU, ~80MB).
-    Assume the conversation_text is formatted with roles (e.g., "User: ... Assistant: ...") for context.
-
-    Args:
-    - conversation_text: The entire conversation as a single string.
-    - num_sentences: Number of sentences to include in the summary (default: 5).
-
-    Returns:
-    - A string containing the summarized conversation.
-    """
-    full_text = conversation_text.strip()
-
-    if not full_text:
-        return "No conversation to summarize."
-
-    # Split text into sentences using regex
-    sentences = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s', full_text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-
-    if len(sentences) <= num_sentences:
-        return " ".join(sentences)
-
-    # Load lightweight model (fast inference)
-    model = embedder
-
-    # Compute embeddings for all sentences
-    sentence_embeddings = model.encode(sentences, convert_to_tensor=False)
-
-    # Compute the centroid (average embedding) as the "topic" representation
-    centroid = np.mean(sentence_embeddings, axis=0)
-
-    # Compute cosine similarities to the centroid
-    similarities = util.cos_sim(centroid.reshape(1, -1), sentence_embeddings)[0]
-
-    # Select top N sentences based on similarity
-    top_indices = np.argsort(-similarities)[:num_sentences]
-    top_sentences = [sentences[i] for i in sorted(top_indices)]
-
-    return " ".join(top_sentences)
-#-------------------------------------------
-
 
 #JUST FOR Testing 
 def rag_query(query: str, final_k: int = 3, candidate_k: int = 50) -> str:
