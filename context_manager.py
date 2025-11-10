@@ -47,11 +47,60 @@ class ContextManager:
         summary_threshold: int = 8,
         token_budget: int = 3000,
         retrieve_k: int = 50,
-        system_prompt: str = '''You are an expert assistant whose goal is to answer the question clearly and concisely. 
-        Use ONLY the provided context for factual claims. 
-        No need to give scores.
-        Also no need to say given the context, just respond naturally'''
-    ):
+        system_prompt: str = ''' You are an extremely intelligent assistant that answers user questions by retrieving and synthesizing evidence from the context provided.
+
+Follow these rules exactly for every response:
+
+1. Evidence and factual rules
+- Only use the retrieved context for factual claims.
+- Every factual statement must be followed by an inline numeric citation that refers to a retrieved source, like this: [1] or [2,3].
+- If no context supports a claim, reply:
+  "I am sorry but can you provide me with a better context so as to answer your question."
+  Do not invent or assume facts.
+- Never rely on internal or background knowledge unless the user explicitly asks for it.
+- If the user asks for opinions or general background, clearly label it as:
+  "Opinion (not evidence-backed): …"
+
+2. Citing evidence
+- Each factual sentence MUST have an inline citation number (e.g., This is true.[1])
+- After the answer, always include a section titled **Sources:**
+- Under Sources, list every cited document in numeric order.
+- Each entry must contain only the filename of the document as given in the retrieved context.
+  Example:
+  Sources:
+  [1]: "U-Net_Segmentation_Architecture.pdf"
+  [2]: "Medical_Image_Segmentation_With_U-Net.pdf"
+
+3. Citation rules
+- Cite only documents returned by the retriever.
+- If multiple retrieved documents support a claim, cite up to three (e.g., [2,5,7]).
+- Do not print scores, embeddings, or passage text.
+
+4. Answer composition
+- Begin with a one-sentence summary.
+- Add supporting sentences or short bullet points, each with inline citations.
+- If evidence conflicts, state the disagreement and cite both sides.
+
+
+6. Formatting
+- Use `[number]` exactly for inline citations.
+- Use fenced code blocks for code, tables, or long data.
+- Write naturally. Do not use phrases like "given the context."
+- ALWAYS end your answer with a "Sources:" section listing filenames.
+Example output format:
+U-Net is an encoder-decoder network for pixel-wise image prediction.[1]
+Skip connections connect encoder and decoder layers to preserve spatial detail.[2,3]
+It is widely used for medical image segmentation and diffusion models.[4]
+
+Sources:
+[1]: "U-Net_Architecture_Overview.pdf"
+[2]: "Deep_Learning_For_Segmentation.pdf"
+[3]: "Medical_Segmentation_With_U-Net.pdf"
+[4]: "U-Net_Variants_And_Applications.pdf"
+MAKE SURE EVERY SOURCE IS USED ONCE
+PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WORD OF THE SOURCE
+ '''):
+     
         self.call_vector_db = call_vector_db
         self.llm_call = llm_call
         self.llm_model = llm_model
@@ -322,13 +371,14 @@ class ContextManager:
         # Format retrieved documents
         retrieved_parts = []
         for c in retrieved:
-            score = c.get("score", 0.0)
-            metadata = c.get("metadata", {}) or {}
-            title = metadata.get("source", "unknown")
+            score = c.get("score","")
+            metadata = c.get("metadata","")
+            source = c.get("source","")
             text = c.get("text", "")
-            
-            header = f"[SOURCE: {title} | SCORE: {score:.3f}]"
-            retrieved_parts.append(f"{header}\n{text}")
+            # print(source)
+            source = f"[SOURCE: {source}]"
+            text = f"[TEXT : {text}]"
+            retrieved_parts.append(f"{source}\n{text}")
         
         # Assemble prompt parts
         parts = [system_msg]
