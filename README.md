@@ -1,156 +1,137 @@
-# ML Chatbot with RAG Pipeline
+# ML Research RAG Chatbot
 
-A **Retrieval-Augmented Generation (RAG)** chatbot built with Streamlit that combines vector search, cross-encoder reranking, and LLM inference to deliver accurate, context-grounded answers.
+A premium, intelligent chatbot designed to answer questions about Machine Learning research papers. It leverages a robust **Retrieval-Augmented Generation (RAG)** pipeline to provide accurate, context-aware answers grounded in the latest academic literature.
 
-## Architecture
-
-### Components
-
-| File | Purpose |
-|------|---------|
-| **RAG.py** | Core RAG logic: vector DB integration, embedding, reranking, LLM calls |
-| **context_manager.py** | LangGraph-based orchestration: conversation memory, context management, message summarization |
-| **app.py** | Streamlit UI: chat interface, streaming responses, persistent thread management |
+**🚀 Deployed Application:** [https://mlresearch-rag.streamlit.app/](https://mlresearch-rag.streamlit.app/)
 
 ---
 
-## Core Features
+## 🏗️ High-Level Architecture
 
-### 1. **RAG.py** - Retrieval & Reranking
-- **`call_vector_db(query, k)`** → Queries **Qdrant vector DB** using `sentence-transformers/all-MiniLM-L6-v2` embeddings; returns top-k chunks with scores
-- **`cross_encoder_rerank(query, docs, top_k)`** → Reranks candidates using `cross-encoder/ms-marco-MiniLM-L-6-v2`; improves relevance by semantic similarity
-- **`llm_call(prompt)`** → Calls `z-ai/glm-4.5-air:free` via OpenRouter API with system prompt for factual, context-only answers
-- **`rag_query(query, final_k, candidate_k)`** → End-to-end pipeline: retrieve candidates → rerank → build context → generate answer
+The system is built on a modular architecture separating the UI, orchestration, and core RAG logic.
 
-### 2. **context_manager.py** - Memory & Orchestration
-- **LangGraph StateGraph** with automatic persistence (MemorySaver)
-- **Workflow nodes:**
-  - `_summarize_node` → Manages message history; auto-summarizes when threshold (8 messages) is reached
-  - `_retrieve_node` → Fetches relevant chunks for the query
-  - `_generate_node` → Builds prompt with history + context; calls LLM
-- **Smart history trimming:** Keeps recent messages, summarizes old ones; respects token budget (3000 tokens default)
-- **Thread management:** Each conversation gets a unique thread_id for persistent multi-turn context
-- **Public API:**
-  - `handle_user_message(user_text, filter_meta, thread_id)` → Full RAG pipeline in one call
-  - `save_messages(user_msg, ai_msg, thread_id)` → Persist user/AI pairs without inference
-  - `retrieve(query, k, filter_meta)` → Standalone retrieval
-  - `build_prompt(user_query, conversation_history, retrieved)` → Token-aware prompt assembly
-
-### 3. **app.py** - Streamlit UI
-- **Chat interface** with Streamlit's native chat components
-- **Streaming responses** → Real-time token generation via `st.write_stream()`
-- **Session management** → Per-browser session state for messages; persists across reruns
-- **Remote ingestion** → Fire-and-forget POST to ingestion service (background doc processing)
-- **Error handling** → Graceful failures without breaking the UI
-- **Caching** → `@st.cache_resource` for LLM model & ContextManager (efficient resource use)
-
----
-
-## Setup
-
-### Requirements
-```
-streamlit
-langchain-openai
-langgraph
-sentence-transformers
-qdrant-client
-litellm
-tiktoken
-python-dotenv
-```
-
-### Environment Variables
-```env
-QDRANT_URL=<qdrant_db_url>
-QDRANT_API_KEY=<qdrant_api_key>
-QDRANT_COLLECTION=document_chunks  # optional, defaults to this
-OPENROUTER_API_KEY=<your_openrouter_key>
-HF_TOKEN=<huggingface_token>  # optional, for embeddings
-INGESTION_SERVICE_URL=https://ingestion-service-zlt7.onrender.com  # optional
-```
-
-### Run the App
-```bash
-streamlit run app.py
+```mermaid
+graph TD
+    User[User] -->|Query| UI[Streamlit UI (app.py)]
+    UI -->|Handle Message| CM[Context Manager (context_manager.py)]
+    
+    subgraph Orchestration [LangGraph Workflow]
+        CM -->|Check History| Sum[Summarizer Node]
+        Sum -->|Decision| Router{Should Retrieve?}
+        Router -->|Yes| Ret[Retriever Node]
+        Router -->|No| End[End]
+        Ret -->|Context| Gen[Generator Node]
+    end
+    
+    subgraph RAG_Core [RAG Engine (RAG.py)]
+        Ret -->|Query| Embed[Embedding Model]
+        Embed -->|Vector| Qdrant[(Qdrant Vector DB)]
+        Qdrant -->|Candidates| Rerank[Cross-Encoder Reranker]
+        Rerank -->|Top-K Docs| Gen
+    end
+    
+    Gen -->|Prompt + Context| LLM[LLM (OpenRouter)]
+    LLM -->|Response| UI
+    
+    subgraph Ingestion [Background Services]
+        Cron[Weekly Cron Job] -->|Fetch Papers| Arxiv[ArXiv API]
+        Arxiv -->|Process & Embed| Qdrant
+    end
 ```
 
 ---
 
-## Data Flow
+## 🧩 Detailed Component Overview
 
-```
-User Query
-    ↓
-[Streamlit UI] (app.py)
-    ↓
-[ContextManager] (context_manager.py)
-    ├─ Load conversation history from thread
-    ├─ Summarize old messages if needed
-    ├─ Retrieve (RAG.py → Qdrant)
-    ├─ Rerank (cross-encoder)
-    └─ Generate (LLM with prompt)
-    ↓
-[Streaming Response]
-    ↓
-[Save to Persistent Memory]
-```
+### 1. Frontend & User Interface (`app.py` & `style.css`)
+- **Framework:** Built with **Streamlit** for a responsive and interactive web application.
+- **Design:** Features a **premium, glassmorphism-inspired UI** with:
+    - Custom CSS for dark mode, smooth animations, and translucent elements.
+    - Mobile-responsive layout ensuring a great experience on all devices.
+    - Real-time streaming of LLM responses for a fluid conversational feel.
+- **Functionality:**
+    - Manages user sessions and chat history.
+    - Displays LaTeX formulas correctly for mathematical explanations.
+    - Provides a sidebar for triggering manual file ingestion.
 
----
+### 2. Orchestration & Memory (`context_manager.py`)
+- **LangGraph:** Uses a state machine to manage the conversation flow.
+- **Smart Memory:**
+    - **Short-term Memory:** Keeps the most recent messages for immediate context.
+    - **Summarization:** Automatically condenses older parts of the conversation using an LLM to maintain long-term context without exceeding token limits.
+- **Token Management:** Dynamically trims prompts and history to fit within the model's context window (default 3000 tokens).
+- **Thread Management:** Assigns unique IDs to conversations for persistent state management.
 
-## Key Configurations
+### 3. Core RAG Logic (`RAG.py`)
+- **Retrieval:**
+    - **Embedding:** Uses `sentence-transformers/all-MiniLM-L6-v2` to convert queries into vectors.
+    - **Vector DB:** Queries **Qdrant** to find the most relevant document chunks.
+- **Reranking:**
+    - **Cross-Encoder:** Uses `cross-encoder/ms-marco-MiniLM-L-6-v2` to re-score the initial candidates. This step significantly improves accuracy by analyzing the deep semantic relationship between the query and the documents.
+- **Generation:**
+    - **LLM:** Connects to high-performance models (e.g., via OpenRouter) to generate answers.
+    - **Citation System:** The system prompt enforces strict evidence-based answering, requiring inline citations (e.g., `[1]`) and a reference list of source files.
 
-| Parameter | Default | Purpose |
-|-----------|---------|---------|
-| `short_term_max_messages` | 10 | Max messages in short-term history |
-| `summary_threshold` | 8 | Trigger summarization at this count |
-| `token_budget` | 3000 | Max tokens in final prompt |
-| `retrieve_k` | 50 | Number of candidates to fetch |
-| `system_prompt` | [see RAG.py] | LLM behavior directive |
-
----
-
-## Usage Examples
-
-### Via Streamlit UI
-Just type queries in the chat box. The system handles everything—retrieval, reranking, context management, streaming.
-
-### Programmatic (Python)
-```python
-from context_manager import ContextManager
-from RAG import call_vector_db, llm_call, cross_encoder_rerank
-from langchain_openai import ChatOpenAI
-
-llm = ChatOpenAI(base_url="https://openrouter.ai/api/v1", 
-                 openai_api_key=..., 
-                 model="z-ai/glm-4.5-air:free")
-
-cm = ContextManager(
-    call_vector_db=call_vector_db,
-    llm_call=llm_call,
-    rerank_fn=cross_encoder_rerank,
-    llm_model=llm
-)
-
-# Start a conversation
-thread_id = cm.start_new_thread()
-result = cm.handle_user_message("What is U-NET?", thread_id=thread_id)
-print(result["answer"])
-```
+### 4. Data Ingestion
+- **Automated Pipeline:** A weekly cron job fetches top trending ML papers from ArXiv.
+- **Processing:** Papers are chunked, embedded, and stored in the Qdrant vector database.
+- **Manual Trigger:** Users can request ingestion of specific files via the UI, which triggers a remote ingestion service.
 
 ---
 
-## Performance Notes
+## 🛠️ Setup & Installation
 
-- **Embeddings** → ~100ms (sentence-transformers, runs locally)
-- **Reranking** → ~200-500ms (cross-encoder, k=50)
-- **LLM inference** → ~1-5s (depends on model & context size, streamed)
-- **Token counting** → Automatic trimming keeps prompts under budget
+### Prerequisites
+- Python 3.8+
+- API Keys: OpenRouter, Qdrant
+
+### Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/your-repo/ml-research-rag.git
+   cd ml-research-rag
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure Environment Variables:**
+   Create a `.env` file in the root directory:
+   ```env
+   QDRANT_URL=<your_qdrant_url>
+   QDRANT_API_KEY=<your_qdrant_api_key>
+   QDRANT_COLLECTION=document_chunks
+   OPENROUTER_API_KEY=<your_openrouter_key>
+   INGESTION_SERVICE_URL=<ingestion_service_url>
+   ```
+
+4. **Run the Application:**
+   ```bash
+   streamlit run app.py
+   ```
 
 ---
 
+## 📊 Performance & Configuration
 
-## Qdrant DB CRON JOB
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `retrieve_k` | 50 | Number of initial candidates fetched from Vector DB |
+| `final_k` | 5 | Number of top documents kept after reranking |
+| `token_budget` | 3000 | Maximum tokens allowed in the LLM prompt |
+| `summary_threshold` | 8 | Number of messages before summarization triggers |
 
-weekly cron jobs are performed in which top-5 ML research papers are ingested into vector database. This ensures that
-the latest information is available to the LLM and also enhances the user experience
+---
+
+## 🔄 Data Flow Summary
+
+1. **User Input:** The user asks a question in the Streamlit UI.
+2. **Context Check:** `ContextManager` loads the conversation history.
+3. **Retrieval:** `RAG.py` converts the query to a vector and searches Qdrant.
+4. **Refinement:** The Cross-Encoder reranks the results to find the best matches.
+5. **Prompting:** A prompt is built with the system instructions, history, and top context chunks.
+6. **Generation:** The LLM generates a streamed response with citations.
+7. **Display:** The answer is shown to the user, and the conversation state is updated.
