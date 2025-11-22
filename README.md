@@ -12,29 +12,40 @@ The system is built on a modular architecture separating the UI, orchestration, 
 
 ```mermaid
 graph TD
-    User[User] -->|Query| UI["Streamlit UI (app.py)"]
-    UI -->|Handle Message| CM["Context Manager (context_manager.py)"]
+    %% Define Styles
+    classDef user fill:#FF6B6B,stroke:#fff,stroke-width:2px,color:#fff,font-weight:bold;
+    classDef ui fill:#6C63FF,stroke:#fff,stroke-width:2px,color:#fff,font-weight:bold,rx:10,ry:10;
+    classDef logic fill:#1A202C,stroke:#00D4FF,stroke-width:2px,color:#fff,rx:5,ry:5;
+    classDef db fill:#2D3748,stroke:#F6E05E,stroke-width:2px,color:#fff;
+    classDef ext fill:#4A5568,stroke:#CBD5E0,stroke-width:2px,color:#fff,stroke-dasharray: 5 5;
+    classDef decision fill:#D53F8C,stroke:#fff,stroke-width:2px,color:#fff,rx:5,ry:5;
+
+    User([User]):::user -->|Query| UI["Streamlit UI (app.py)"]:::ui
+    UI -->|Handle Message| CM["Context Manager (context_manager.py)"]:::logic
     
     subgraph Orchestration [LangGraph Workflow]
-        CM -->|Check History| Sum[Summarizer Node]
-        Sum -->|Decision| Router{Should Retrieve?}
-        Router -->|Yes| Ret[Retriever Node]
-        Router -->|No| End[End]
-        Ret -->|Context| Gen[Generator Node]
+        style Orchestration fill:#232730,stroke:#00D4FF,stroke-width:1px,stroke-dasharray: 5 5,color:#fff
+        CM -->|Check History| Sum[Summarizer Node]:::logic
+        Sum -->|Decision| Router{Should Retrieve?}:::decision
+        Router -->|Yes| Ret[Retriever Node]:::logic
+        Router -->|No| End((End)):::logic
+        Ret -->|Context| Gen[Generator Node]:::logic
     end
     
     subgraph RAG_Core ["RAG Engine (RAG.py)"]
-        Ret -->|Query| Embed[Embedding Model]
-        Embed -->|Vector| Qdrant[(Qdrant Vector DB)]
-        Qdrant -->|Candidates| Rerank[Cross-Encoder Reranker]
+        style RAG_Core fill:#232730,stroke:#6C63FF,stroke-width:1px,stroke-dasharray: 5 5,color:#fff
+        Ret -->|Query| Embed[Embedding Model]:::logic
+        Embed -->|Vector| Qdrant[(Qdrant Vector DB)]:::db
+        Qdrant -->|Candidates| Rerank[Cross-Encoder Reranker]:::logic
         Rerank -->|Top-K Docs| Gen
     end
     
-    Gen -->|Prompt + Context| LLM["LLM (OpenRouter)"]
+    Gen -->|Prompt + Context| LLM["LLM (OpenRouter)"]:::ext
     LLM -->|Response| UI
     
     subgraph Ingestion [Background Services]
-        Cron[Weekly Cron Job] -->|Fetch Papers| Arxiv[ArXiv API]
+        style Ingestion fill:#232730,stroke:#A0AEC0,stroke-width:1px,stroke-dasharray: 5 5,color:#fff
+        Cron[Weekly Cron Job]:::ext -->|Fetch Papers| Arxiv[ArXiv API]:::ext
         Arxiv -->|Process & Embed| Qdrant
     end
 ```
