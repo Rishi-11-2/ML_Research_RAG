@@ -58,6 +58,15 @@ cm = get_context_manager(llm_model)
 
 
 st.set_page_config(page_title="Machine Learning Chatbot", layout="centered")
+
+# --- Custom CSS Injection ---
+def local_css(file_name):
+    with open(file_name) as f:
+        st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+
+local_css("style.css")
+# ----------------------------
+
 st.title("Machine Learning Chatbot 💬")
 
 
@@ -145,9 +154,19 @@ if query := st.chat_input("Enter your query"):
             )
         except Exception as e:
             st.warning(f"Failed to save history: {e}")
-        
-        # 9. Trigger ingestion
-        try:
-            trigger_remote_ingestion(query)
-        except Exception as e:
-            print(f"[WARN] trigger_remote_ingestion threw: {e}", flush=True)
+
+
+# --- Sidebar for File Ingestion ---
+with st.sidebar:
+    st.header("File Ingestion")
+    st.markdown("Enter the filename you want to ingest.")
+    
+    filename_input = st.text_input("Filename", placeholder="example.pdf")
+    
+    if st.button("Ingest File"):
+        if filename_input.strip():
+            with st.spinner(f"Triggering ingestion for {filename_input}..."):
+                trigger_remote_ingestion(filename_input)
+            st.success(f"Ingestion triggered for: {filename_input}")
+        else:
+            st.warning("Please enter a valid filename.")
