@@ -12,8 +12,8 @@ The system is built on a modular architecture separating the UI, orchestration, 
 
 ```mermaid
 graph TD
-    User[User] -->|Query| UI[Streamlit UI (app.py)]
-    UI -->|Handle Message| CM[Context Manager (context_manager.py)]
+    User[User] -->|Query| UI["Streamlit UI (app.py)"]
+    UI -->|Handle Message| CM["Context Manager (context_manager.py)"]
     
     subgraph Orchestration [LangGraph Workflow]
         CM -->|Check History| Sum[Summarizer Node]
@@ -23,14 +23,14 @@ graph TD
         Ret -->|Context| Gen[Generator Node]
     end
     
-    subgraph RAG_Core [RAG Engine (RAG.py)]
+    subgraph RAG_Core ["RAG Engine (RAG.py)"]
         Ret -->|Query| Embed[Embedding Model]
         Embed -->|Vector| Qdrant[(Qdrant Vector DB)]
         Qdrant -->|Candidates| Rerank[Cross-Encoder Reranker]
         Rerank -->|Top-K Docs| Gen
     end
     
-    Gen -->|Prompt + Context| LLM[LLM (OpenRouter)]
+    Gen -->|Prompt + Context| LLM["LLM (OpenRouter)"]
     LLM -->|Response| UI
     
     subgraph Ingestion [Background Services]
