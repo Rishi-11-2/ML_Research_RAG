@@ -38,7 +38,7 @@ def get_llm_model():
         base_url="https://openrouter.ai/api/v1",
         openai_api_key=os.getenv("OPENROUTER_API_KEY"),
         model="openai/gpt-oss-20b:free", 
-        temperature=0
+        temperature=0.7
     )
 
 
@@ -99,61 +99,35 @@ if query := st.chat_input("Enter your query"):
         with st.chat_message("user"):
             st.markdown(query)
         
-        # --- Streaming RAG Logic with LaTeX (Single Display) ---
+        # --- LangGraph Streaming RAG Logic ---
         with st.chat_message("assistant"):
             # Create empty placeholder for streaming output
             message_placeholder = st.empty()
             
             with st.spinner("Thinking..."):
                 try:
-                    # 1. Get conversation history
-                    history = cm.get_conversation_history(st.session_state.thread_id)
-                    
-                    # 2. Retrieve context
-                    context_chunks = cm.retrieve(query) 
-                    
-                    # 3. Build the prompt
-                    prompt = cm.build_prompt(
-                        user_query=query,
-                        conversation_history=history,
-                        retrieved=context_chunks
+                    # Stream response using LangGraph
+                    full_response = message_placeholder.write_stream(
+                        cm.stream_user_message(query, st.session_state.thread_id)
                     )
-                    
-                    # 4. Stream to placeholder directly
-                    def stream_generator():
-                        for chunk in llm_model.stream(prompt):
-                            yield chunk.content
-                    
-                    # 5. Stream response to placeholder
-                    full_response = message_placeholder.write_stream(stream_generator())
-
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
                     full_response = "Sorry, I ran into an error."
 
-
-        # 6. Convert LaTeX delimiters and update placeholder once
+        # Convert LaTeX delimiters and update placeholder once
         full_response_converted = convert_latex_delimiters(full_response)
         
         # Only update if conversion changed something
         if full_response_converted != full_response:
             message_placeholder.markdown(full_response_converted)
         
-        # 7. Add to UI chat history with converted version
+        # Add to UI chat history with converted version
         st.session_state.messages.append({
             "role": "assistant",
             "content": full_response_converted
         })
         
-        # 8. Save to ContextManager
-        try:
-            cm.save_messages(
-                user_message=HumanMessage(content=query),
-                ai_message=AIMessage(content=full_response_converted),
-                thread_id=st.session_state.thread_id
-            )
-        except Exception as e:
-            st.warning(f"Failed to save history: {e}")
+        # Note: ContextManager (LangGraph) automatically saves the conversation history.
 
 
 # --- Sidebar for File Ingestion ---

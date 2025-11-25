@@ -113,70 +113,27 @@ def call_vector_db(query: str, k: int) -> List[dict]:
 #---------------------------
 
 
-def llm_call(prompt: str) -> str:
+def llm_call(user_query,conversation_history) -> str:
+
+    prompt = f"User Query: {user_query}\nConversation History: {conversation_history}"
     messages = [
-    {"role": "system", "content": ''' You are an extremely intelligent assistant that answers user questions by retrieving and synthesizing evidence from the context provided.
-
-Follow these rules exactly for every response:
-
-1. Evidence and factual rules
-- Only use the retrieved context for factual claims.
-- Every factual statement must be followed by an inline numeric citation that refers to a retrieved source, like this: [1] or [2,3].
-- If no context supports a claim, reply:
-  "I am sorry but can you provide me with a better context so as to answer your question."
-  Do not invent or assume facts.
-- Never rely on internal or background knowledge unless the user explicitly asks for it.
-- If the user asks for opinions or general background, clearly label it as:
-  "Opinion (not evidence-backed): …"
-
-2. Citing evidence
-- Each factual sentence MUST have an inline citation number (e.g., This is true.[1])
-- After the answer, always include a section titled **Sources:**
-- Under Sources, list every cited document in numeric order.
-- Each entry must contain only the filename of the document as given in the retrieved context.
-  Example:
-  Sources:
-  [1]: "U-Net_Segmentation_Architecture.pdf"
-  [2]: "Medical_Image_Segmentation_With_U-Net.pdf"
-
-3. Citation rules
-- Cite only documents returned by the retriever.
-- If multiple retrieved documents support a claim, cite up to three (e.g., [2,5,7]).
-- Do not print scores, embeddings, or passage text.
-
-4. Answer composition
-- Begin with a one-sentence summary.
-- Add supporting sentences or short bullet points, each with inline citations.
-- If evidence conflicts, state the disagreement and cite both sides.
-
-
-6. Formatting
-- Use `[number]` exactly for inline citations.
-- Use fenced code blocks for code, tables, or long data.
-- Write naturally. Do not use phrases like "given the context."
-- ALWAYS end your answer with a "Sources:" section listing filenames.
-Example output format:
-U-Net is an encoder-decoder network for pixel-wise image prediction.[1]
-Skip connections connect encoder and decoder layers to preserve spatial detail.[2,3]
-It is widely used for medical image segmentation and diffusion models.[4]
-
-Sources:
-[1]: "U-Net_Architecture_Overview.pdf"
-[2]: "Deep_Learning_For_Segmentation.pdf"
-[3]: "Medical_Segmentation_With_U-Net.pdf"
-[4]: "U-Net_Variants_And_Applications.pdf"
-MAKE SURE EVERY SOURCE IS USED ONCE
-PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WORD OF THE SOURCE '''},
+    {"role": "system", "content": ''' You are a query rewriting engine. Your job is to REWRITE the user's last query to be fully standalone based on the conversation history.
+     The ouput query should be such that the query can be efficiently and effectively  used to fetch relevant context from a vector database optimized for fast retrieval. 
+- Resolve pronouns (it, they, that) to specific entities.
+- DO NOT answer the question.
+- if you have to reference previous conversations make sure that you include that conversations in the query in the compact form
+- do not say BASED ON THE CONVERSATION HISTORY
+- Output ONLY the rewritten query text. No explanations. '''},
     {"role": "user", "content": prompt}
     ]
     resp = completion(
         model="openrouter/openai/gpt-oss-20b:free",
         messages=messages,
     )
+    print(resp.choices[0].message.content)
     return resp.choices[0].message.content
 
 #------------------------------
-
 
 #JUST FOR Testing 
 def rag_query(query: str, final_k: int = 3, candidate_k: int = 50) -> str:

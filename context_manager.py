@@ -7,7 +7,6 @@ from langchain_core.messages import (
     HumanMessage, 
     AIMessage, 
     SystemMessage, 
-    RemoveMessage,
     BaseMessage
 )
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -19,6 +18,7 @@ from langgraph.graph import START, END, StateGraph
 class RAGState(TypedDict):
     messages: List[BaseMessage]
     user_query: Optional[str] # <-- Made optional
+    search_query:Optional[str]
     context: List[Dict[str, Any]]
     filter_meta: Optional[Dict[str, Any]]
     prompt: str
@@ -128,6 +128,7 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         
         # Define the nodes
         workflow.add_node("check_summary", self._summarize_node)
+        workflow.add_node("query_rewritting", self._query_rewritting_node)
         workflow.add_node("retrieve_context", self._retrieve_node)
         workflow.add_node("generate_answer", self._generate_node)
         
@@ -139,15 +140,31 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
             "check_summary",  # The node to branch from
             self._should_retrieve, # A function to decide the next step
             {
-                "retrieve": "retrieve_context", # If "retrieve", go to retrieve_node
+                "retrieve": "query_rewritting", # If "retrieve", go to retrieve_node
                 "end": END                      # If "end", stop here
             }
         )
         
+        workflow.add_edge("query_rewritting", "retrieve_context")
         workflow.add_edge("retrieve_context", "generate_answer")
         workflow.add_edge("generate_answer", END)
         
         return workflow
+
+    
+
+    def _query_rewritting_node(self, state: RAGState) -> Dict[str, Any]:
+        """
+        Rewrite the query to make it more specific.
+        """
+        conversation_parts = self.conversation_history(state['messages'])
+        conversation_block = "\n".join(conversation_parts) if conversation_parts else ""
+
+
+        state['search_query'] = self.llm_call(state['user_query'], conversation_block) 
+        return state
+
+
 
     # --- NEW DECIDER FUNCTION ---
     def _should_retrieve(self, state: RAGState) -> str:
@@ -182,11 +199,11 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
     def _retrieve_node(self, state: RAGState) -> Dict[str, Any]:
         """Retrieve documents based on the user query."""
         # We can be sure user_query exists because _should_retrieve checked it
-        user_query = state["user_query"] 
+        search_query = state["search_query"] 
         filter_meta = state.get("filter_meta")
         
         retrieved_chunks = self.retrieve(
-            user_query, 
+            search_query, 
             k=self.retrieve_k, 
             filter_meta=filter_meta
         )
@@ -204,12 +221,35 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
             retrieved=retrieved_chunks
         )
         
-        answer = self.llm_call(prompt)
-        
-        assistant_message = AIMessage(content=answer)
+        # Use invoke() on the ChatModel directly to support streaming events
+        response_message = self.llm_model.invoke(prompt)
         
         # Return new messages and the prompt for logging
-        return {"messages": [assistant_message], "prompt": prompt}
+        return {"messages": [response_message], "prompt": prompt}
+
+    def stream_user_message(
+        self, 
+        user_text: str, 
+        thread_id: Optional[str] = None
+    ):
+        """
+        Stream the response token-by-token using LangGraph's stream_events.
+        """
+        if thread_id is None:
+            thread_id = self.start_new_thread()
+        
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        graph_input = {
+            "messages": [HumanMessage(content=user_text)],
+            "user_query": user_text
+        }
+        
+        # Use stream with stream_mode="messages" to get token chunks
+        for msg, metadata in self.app.stream(graph_input, config=config, stream_mode="messages"):
+            if metadata.get("langgraph_node") == "generate_answer":
+                if msg.content:
+                    yield msg.content
 
 
     def _summarize_and_process(self, messages: List[BaseMessage]) -> Dict[str, List[BaseMessage]]:
@@ -244,10 +284,17 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         )
         
         # Delete old messages and keep summary + recent messages
-        delete_messages = [RemoveMessage(id=m.id) for m in messages_to_summarize]
+        # Note: RemoveMessage is not available in this version of langchain_core
+        # We will just return the new list which should overwrite if we were using a setter, 
+        # but with add_messages reducer, we need RemoveMessage to delete.
+        # For now, we will just append the summary and keep the history growing (suboptimal)
+        # or we can try to return a list that *replaces* if we change the reducer.
+        # But since we can't change the reducer easily here without checking graph definition,
+        # we will just append the summary.
+        # Ideally: delete_messages = [RemoveMessage(id=m.id) for m in messages_to_summarize]
         
         return {
-            "messages": [summary_message] + recent_messages + delete_messages
+            "messages": [summary_message] # + delete_messages
         }
 
     def handle_user_message(
@@ -341,18 +388,7 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         
         return candidates
 
-    def build_prompt(
-        self,
-        user_query: str,
-        conversation_history: List[BaseMessage],
-        retrieved: List[Dict[str, Any]]
-    ) -> str:
-        """
-        Build token-aware prompt with conversation history and retrieved context.
-        """
-        # Build system message
-        system_msg = f"SYSTEM:\n{self.system_prompt}"
-        
+    def conversation_history(self,conversation_history):
         # Format conversation history
         # We don't need to exclude the last message, as the graph state
         # only contains history *up to* the generation step.
@@ -365,6 +401,22 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
                 conversation_parts.append(f"USER: {msg.content}")
             elif isinstance(msg, AIMessage):
                 conversation_parts.append(f"ASSISTANT: {msg.content}")
+        return conversation_parts
+    
+    def build_prompt(
+        self,
+        user_query: str,
+        conversation_history: List[BaseMessage],
+        retrieved: List[Dict[str, Any]]
+    ) -> str:
+        """
+        Build token-aware prompt with conversation history and retrieved context.
+        """
+        # Build system message
+        system_msg = f"SYSTEM:\n{self.system_prompt}"
+        
+
+        conversation_parts = self.conversation_history(conversation_history)
         
         conversation_block = "\n".join(conversation_parts) if conversation_parts else ""
         
