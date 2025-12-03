@@ -1,14 +1,31 @@
 import time
 import uuid
-from typing import List, Dict, Any, Callable, Optional, TypedDict
+from typing import List, Dict, Any, Callable, Optional, TypedDict, Annotated, Union
 import tiktoken
 
 from langchain_core.messages import (
     HumanMessage, 
     AIMessage, 
     SystemMessage, 
-    BaseMessage
+    BaseMessage,
 )
+
+# Try to import RemoveMessage and add_messages, provide fallbacks if missing
+try:
+    from langchain_core.messages import RemoveMessage
+except ImportError:
+    RemoveMessage = None
+
+try:
+    from langgraph.graph.message import add_messages
+except ImportError:
+    def add_messages(left, right):
+        if not isinstance(left, list):
+            left = [left]
+        if not isinstance(right, list):
+            right = [right]
+        return left + right
+
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, END, StateGraph
@@ -16,7 +33,7 @@ from langgraph.graph import START, END, StateGraph
 
 # Define the state for our graph
 class RAGState(TypedDict):
-    messages: List[BaseMessage]
+    messages: Annotated[List[BaseMessage], add_messages]
     user_query: Optional[str] # <-- Made optional
     search_query:Optional[str]
     context: List[Dict[str, Any]]
@@ -47,7 +64,7 @@ class ContextManager:
         summary_threshold: int = 8,
         token_budget: int = 3000,
         retrieve_k: int = 50,
-        system_prompt: str = ''' You are an extremely intelligent assistant that answers user questions by retrieving and synthesizing evidence from the context provided.
+        system_prompt: str = ''' You are an extremely intelligent assistant that answers user questions in depth  by  synthesizing information from the context provided.
 
 Follow these rules exactly for every response:
 
@@ -66,6 +83,8 @@ Follow these rules exactly for every response:
 - After the answer, always include a section titled **Sources:**
 - Under Sources, list every cited document in numeric order.
 - Each entry must contain only the filename of the document as given in the retrieved context.
+- Do not hallucinate any citations.
+- Do not cite any document that is not in the retrieved context.
   Example:
   Sources:
   [1]: "U-Net_Segmentation_Architecture.pdf"
@@ -160,9 +179,11 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         conversation_parts = self.conversation_history(state['messages'])
         conversation_block = "\n".join(conversation_parts) if conversation_parts else ""
 
-
-        state['search_query'] = self.llm_call(state['user_query'], conversation_block) 
-        return state
+        # Generate the rewritten search query
+        search_query = self.llm_call(state['user_query'], conversation_block)
+        
+        # Return only the updates (proper LangGraph pattern)
+        return {"search_query": search_query}
 
 
 
@@ -188,13 +209,11 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         
         # Check if we need to summarize
         if len(messages) >= self.summary_threshold:
-            # This function returns a dict, so we update state with it
-            summary_update = self._summarize_and_process(messages)
-            state.update(summary_update)
-            return summary_update
+            # Return the updates from summarization (delete old + add summary)
+            return self._summarize_and_process(messages)
         
-        # No summarization needed, just pass the messages through
-        return {"messages": messages}
+        # No summarization needed, return empty dict (no updates)
+        return {}
 
     def _retrieve_node(self, state: RAGState) -> Dict[str, Any]:
         """Retrieve documents based on the user query."""
@@ -255,12 +274,11 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
     def _summarize_and_process(self, messages: List[BaseMessage]) -> Dict[str, List[BaseMessage]]:
         """
         Summarize old messages when threshold is reached.
-        Keeps recent messages and creates a summary of older ones.
+        Deletes old messages and replaces them with a summary.
         """
         # Split messages: older ones to summarize, recent ones to keep
         num_to_summarize = len(messages) - (self.short_term_max_messages // 2)
         messages_to_summarize = messages[:num_to_summarize]
-        recent_messages = messages[num_to_summarize:]
         
         # Generate summary using LLM
         summary_prompt = (
@@ -283,19 +301,20 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
             content=f"[CONVERSATION SUMMARY]: {summary_content}"
         )
         
-        # Delete old messages and keep summary + recent messages
-        # Note: RemoveMessage is not available in this version of langchain_core
-        # We will just return the new list which should overwrite if we were using a setter, 
-        # but with add_messages reducer, we need RemoveMessage to delete.
-        # For now, we will just append the summary and keep the history growing (suboptimal)
-        # or we can try to return a list that *replaces* if we change the reducer.
-        # But since we can't change the reducer easily here without checking graph definition,
-        # we will just append the summary.
-        # Ideally: delete_messages = [RemoveMessage(id=m.id) for m in messages_to_summarize]
-        
-        return {
-            "messages": [summary_message] # + delete_messages
-        }
+        # Create RemoveMessage instances to delete old messages if supported
+        if RemoveMessage:
+            delete_messages = [RemoveMessage(id=m.id) for m in messages_to_summarize]
+            return {
+                "messages": delete_messages + [summary_message]
+            }
+        else:
+            # Fallback: Just return the summary message. 
+            # Without RemoveMessage, we can't easily delete old ones in the append-only model 
+            # unless we overwrite the whole list, which requires a different reducer.
+            # For now, we just add the summary. It's suboptimal but prevents crashing.
+            return {
+                "messages": [summary_message]
+            }
 
     def handle_user_message(
         self, 

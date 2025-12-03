@@ -10,8 +10,8 @@ tiktoken
 streamlit
 qdrant-client
 aiohttp
-langgraph>=1.0.0
+langgraph
 langchain>=0.3.0
 langchain-core>=0.3.0
-langgraph-checkpoint>=1.0.0
+langgraph-checkpoint
 langchain-openai>=0.2.0

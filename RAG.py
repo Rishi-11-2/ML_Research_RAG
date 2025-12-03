@@ -16,6 +16,8 @@ QDRANT_URL = os.environ.get("QDRANT_URL")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "document_chunks")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
 
+client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_grpc=False)
+
 #--------------------------
 # -----------------------
 OPEN_ROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -60,7 +62,12 @@ def cross_encoder_rerank(query: str, docs: List, top_k: int = 5) -> List[dict]:
             "metadata": d.get("metadata"),
             "source": d.get("source")
         })
-    return results
+    
+    # Sort by score in descending order (highest relevance first)
+    results.sort(key=lambda x: x["score"] if x["score"] is not None else -float('inf'), reverse=True)
+    
+    # Return only top_k results
+    return results[:top_k]
 
 
 def call_vector_db(query: str, k: int) -> List[dict]:
@@ -71,7 +78,7 @@ def call_vector_db(query: str, k: int) -> List[dict]:
     using the Reciprocal Rank Fusion.
     """
     query_vec = embedder.encode([query])[0]
-    client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_grpc=False)
+    # client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_grpc=False)
     # Search Qdrant
     results = client.query_points(
         collection_name=QDRANT_COLLECTION,
@@ -130,7 +137,7 @@ def llm_call(user_query,conversation_history) -> str:
         model="openrouter/openai/gpt-oss-20b:free",
         messages=messages,
     )
-    print(resp.choices[0].message.content)
+    # print(resp.choices[0].message.content)
     return resp.choices[0].message.content
 
 #------------------------------
