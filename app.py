@@ -115,8 +115,8 @@ if query := st.chat_input("Enter your query"):
                     full_response = "Sorry, I ran into an error."
 
         # Convert LaTeX delimiters and update placeholder once
-        full_response_converted = full_response
-        # full_response_converted = convert_latex_delimiters(full_response)
+        # full_response_converted = full_response
+        full_response_converted = convert_latex_delimiters(full_response)
         
         # Only update if conversion changed something
         if full_response_converted != full_response:
