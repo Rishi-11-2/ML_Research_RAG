@@ -134,7 +134,7 @@ def llm_call(user_query,conversation_history) -> str:
     {"role": "user", "content": prompt}
     ]
     resp = completion(
-        model="openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
+        model="openrouter/xiaomi/mimo-v2-flash:free",
         messages=messages,
     )
     # print(resp.choices[0].message.content)

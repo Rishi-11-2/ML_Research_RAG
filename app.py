@@ -37,7 +37,7 @@ def get_llm_model():
     return ChatOpenAI(
         base_url="https://openrouter.ai/api/v1",
         openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-        model="nvidia/nemotron-3-nano-30b-a3b:free", 
+        model="xiaomi/mimo-v2-flash:free", 
         temperature=0.7
     )
 
@@ -115,7 +115,8 @@ if query := st.chat_input("Enter your query"):
                     full_response = "Sorry, I ran into an error."
 
         # Convert LaTeX delimiters and update placeholder once
-        full_response_converted = convert_latex_delimiters(full_response)
+        full_response_converted = full_response
+        # full_response_converted = convert_latex_delimiters(full_response)
         
         # Only update if conversion changed something
         if full_response_converted != full_response:
