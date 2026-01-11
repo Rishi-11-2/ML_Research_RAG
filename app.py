@@ -37,7 +37,7 @@ def get_llm_model():
     return ChatOpenAI(
         base_url="https://openrouter.ai/api/v1",
         openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-        model="openai/gpt-oss-20b:free", 
+        model="nvidia/nemotron-3-nano-30b-a3b:free", 
         temperature=0.7
     )
 
