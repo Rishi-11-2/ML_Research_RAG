@@ -5,3 +5,5 @@ __pycache__/**
 *.pyc
 papers/
 papers_temp/
+interview.txt
+interview_answers.md
