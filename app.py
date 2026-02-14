@@ -35,12 +35,10 @@ def convert_latex_delimiters(text: str) -> str:
 def get_llm_model():
     """Cache the LLM model instance."""
     return ChatOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-        model="xiaomi/mimo-v2-flash:free", 
-        temperature=0.7
+        model="openai/gpt-oss-20b",
+        api_key=os.getenv("GROQ_API_KEY"),
+        base_url="https://api.groq.com/openai/v1",
     )
-
 
 @st.cache_resource
 def get_context_manager(_llm_model):

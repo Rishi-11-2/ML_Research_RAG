@@ -2,6 +2,8 @@ import os
 import numpy as np
 from typing import List, Tuple
 import re
+
+from groq import Groq
 # import chromadb
 import numpy as np
 
@@ -21,7 +23,6 @@ client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_
 #--------------------------
 # -----------------------
 OPEN_ROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-os.environ["OPENROUTER_API_KEY"] = OPEN_ROUTER_API_KEY
 
 
 
@@ -122,6 +123,8 @@ def call_vector_db(query: str, k: int) -> List[dict]:
 
 def llm_call(user_query,conversation_history) -> str:
 
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
     prompt = f"User Query: {user_query}\nConversation History: {conversation_history}"
     messages = [
     {"role": "system", "content": ''' You are a query rewriting engine. Your job is to REWRITE the user's last query to be fully standalone based on the conversation history.
@@ -133,8 +136,8 @@ def llm_call(user_query,conversation_history) -> str:
 - Output ONLY the rewritten query text. No explanations. '''},
     {"role": "user", "content": prompt}
     ]
-    resp = completion(
-        model="openrouter/xiaomi/mimo-v2-flash:free",
+    resp = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
         messages=messages,
     )
     # print(resp.choices[0].message.content)
