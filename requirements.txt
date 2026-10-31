@@ -5,7 +5,7 @@ docling
 litellm
 pandas
 pydantic
-sentence-transformers
+sentence-transformers>=6.1.0
 tiktoken
 streamlit
 qdrant-client

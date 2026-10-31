@@ -1,32 +1,35 @@
 import os
+from functools import lru_cache
 import numpy as np
-from typing import List, Tuple
-import re
+from typing import List
 
 from groq import Groq
 # import chromadb
-import numpy as np
 
 from dotenv import load_dotenv
-from litellm import completion
-from sentence_transformers import SentenceTransformer, CrossEncoder , util
-from qdrant_client import QdrantClient , models
+from sentence_transformers import SentenceTransformer, CrossEncoder
+from qdrant_client import QdrantClient
 
 load_dotenv()
 
 QDRANT_URL = os.environ.get("QDRANT_URL")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "document_chunks")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EG2_COLLECTION = os.getenv("QDRANT_COLLECTION_EG2", f"{QDRANT_COLLECTION}_embeddinggemma2")
+ACTIVE_COLLECTION = EG2_COLLECTION if EMBEDDING_MODEL == "google/embeddinggemma-2" else QDRANT_COLLECTION
 
-client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_grpc=False)
+if not QDRANT_URL:
+    raise RuntimeError("QDRANT_URL must be set before starting the RAG application")
+client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY.strip() if QDRANT_API_KEY else None, prefer_grpc=False)
 
 #--------------------------
 # -----------------------
-OPEN_ROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
-
-
-embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+embedder = SentenceTransformer(
+    EMBEDDING_MODEL,
+    **({"config_kwargs": {"vision_config": None, "audio_config": None}, "truncate_dim": 256}
+       if EMBEDDING_MODEL == "google/embeddinggemma-2" else {}),
+)
 cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
@@ -38,6 +41,24 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     if denom == 0: 
         return 0.0
     return float(np.dot(a, b) / denom)
+
+
+@lru_cache(maxsize=512)
+def _cached_query_embedding(query: str) -> np.ndarray:
+    if EMBEDDING_MODEL == "google/embeddinggemma-2":
+        return embedder.encode(query, prompt_name="SearchQuery", normalize_embeddings=True)
+    return embedder.encode(query, normalize_embeddings=True)
+
+
+def embed_document(text: str, title: str = "none") -> np.ndarray:
+    """Embed a document using the same model and task prompt as query-time retrieval."""
+    if EMBEDDING_MODEL == "google/embeddinggemma-2":
+        return embedder.encode(
+            f"title: {title or 'none'} | text: {text}",
+            prompt_name="Document",
+            normalize_embeddings=True,
+        )
+    return embedder.encode(text, normalize_embeddings=True)
 
 #-------------------------
 
@@ -51,7 +72,10 @@ def cross_encoder_rerank(query: str, docs: List, top_k: int = 5) -> List[dict]:
 
 
 
-    pairs = [[query, d.get("text")] for d in docs]
+    docs = [d for d in docs if isinstance(d.get("text"), str) and d["text"].strip()]
+    if not docs:
+        return []
+    pairs = [[query, d["text"]] for d in docs]
     scores = cross_encoder.predict(pairs)  # numpy array or list of floats
     scores = scores.tolist()
     results = []
@@ -78,11 +102,11 @@ def call_vector_db(query: str, k: int) -> List[dict]:
     uses the dense and sparse vectors, with their results combined
     using the Reciprocal Rank Fusion.
     """
-    query_vec = embedder.encode([query])[0]
+    query_vec = _cached_query_embedding(query)
     # client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_grpc=False)
     # Search Qdrant
     results = client.query_points(
-        collection_name=QDRANT_COLLECTION,
+        collection_name=ACTIVE_COLLECTION,
         query=query_vec, 
         limit=k,
         with_vectors=False,
@@ -101,7 +125,7 @@ def call_vector_db(query: str, k: int) -> List[dict]:
         meta = {k: v for k, v in payload.items() if k not in ("text",  "source", "_stable_id")}
 
         source = payload.get("source")
-        score_f = float(score) 
+        score_f = float(score) if score is not None else 0.0
 
 
         # print(source)
@@ -162,13 +186,22 @@ def rag_query(query: str, final_k: int = 3, candidate_k: int = 50) -> str:
     # print(candidat)
     reranked = cross_encoder_rerank(query, candidates, top_k=final_k)
 
-    # Build context text -> preserve ordering and include score for debugging if wanted
-    context = "\n\n".join(f"[{i+1}] {doc}" for i, doc in enumerate(reranked))
-
-   
-    context = f"context:{context}, query : {query}"
-    resp = llm_call(context)
-    return resp
+    context = "\n\n".join(
+        f"[{i + 1}] Source: {doc.get('source', 'unknown')}\n{doc.get('text', '')}"
+        for i, doc in enumerate(reranked)
+    )
+    answer_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    response = answer_client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[
+            {
+                "role": "system",
+                "content": "Answer using only the retrieved context. Cite factual claims with [n] and list the source filenames.",
+            },
+            {"role": "user", "content": f"Question: {query}\n\nRetrieved context:\n{context}"},
+        ],
+    )
+    return response.choices[0].message.content or ""
 
 if __name__ == "__main__":
     # q = "How can we explain the whole process of FDB mathematically?"
