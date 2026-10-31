@@ -19,9 +19,8 @@ jobs:
     env:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-      QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION }}
-      QDRANT_COLLECTION_EG2: ${{ vars.QDRANT_COLLECTION_EG2 }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_EG2: document_chunks_embeddinggemma2
       HF_HOME: ${{ github.workspace }}/.hf_cache
 
     steps:
@@ -52,9 +51,6 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
-          [[ -n "$HF_TOKEN" ]] || { echo "HF_TOKEN secret is required for the gated model" >&2; exit 1; }
-          [[ -n "$QDRANT_COLLECTION" ]] || { echo "QDRANT_COLLECTION repository variable is required" >&2; exit 1; }
-          [[ -n "$QDRANT_COLLECTION_EG2" ]] || { echo "QDRANT_COLLECTION_EG2 repository variable is required" >&2; exit 1; }
           [[ "$QDRANT_COLLECTION" != "$QDRANT_COLLECTION_EG2" ]] || { echo "Source and destination collections must differ" >&2; exit 1; }
 
       - name: Resume migration into the separate collection
@@ -69,9 +65,8 @@ jobs:
     env:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-      QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION }}
-      QDRANT_COLLECTION_EG2: ${{ vars.QDRANT_COLLECTION_EG2 }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_EG2: document_chunks_embeddinggemma2
       HF_HOME: ${{ github.workspace }}/.hf_cache
     steps:
       - name: Check out migration code
@@ -101,9 +96,6 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
-          [[ -n "$HF_TOKEN" ]] || { echo "HF_TOKEN secret is required for the gated model" >&2; exit 1; }
-          [[ -n "$QDRANT_COLLECTION" ]] || { echo "QDRANT_COLLECTION repository variable is required" >&2; exit 1; }
-          [[ -n "$QDRANT_COLLECTION_EG2" ]] || { echo "QDRANT_COLLECTION_EG2 repository variable is required" >&2; exit 1; }
           [[ "$QDRANT_COLLECTION" != "$QDRANT_COLLECTION_EG2" ]] || { echo "Source and destination collections must differ" >&2; exit 1; }
 
       - name: Resume migration into the separate collection
