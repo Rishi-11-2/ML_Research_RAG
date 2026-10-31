@@ -1,0 +1,110 @@
+name: Migrate Qdrant to EmbeddingGemma 2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Prevent separate workflow runs from writing the same destination concurrently.
+concurrency:
+  group: embeddinggemma2-qdrant-migration
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    # GitHub-hosted Apple Silicon M2 runner with GPU acceleration.
+    runs-on: macos-latest-xlarge
+    timeout-minutes: 360
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION }}
+      QDRANT_COLLECTION_EG2: ${{ vars.QDRANT_COLLECTION_EG2 }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_HOME: ${{ github.workspace }}/.hf_cache
+
+    steps:
+      - name: Check out migration code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore EmbeddingGemma 2 model cache
+        uses: actions/cache@v4
+        with:
+          path: .hf_cache
+          key: embeddinggemma2-hf-macos-arm64-v1
+
+      - name: Create the migration virtual environment
+        run: python -m venv ML_Research_RAG
+
+      - name: Install migration dependencies
+        run: |
+          ./ML_Research_RAG/bin/python -m pip install --upgrade pip
+          ./ML_Research_RAG/bin/python -m pip install "sentence-transformers>=6.1.0" qdrant-client python-dotenv numpy
+
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
+          [[ -n "$HF_TOKEN" ]] || { echo "HF_TOKEN secret is required for the gated model" >&2; exit 1; }
+          [[ -n "$QDRANT_COLLECTION" ]] || { echo "QDRANT_COLLECTION repository variable is required" >&2; exit 1; }
+          [[ -n "$QDRANT_COLLECTION_EG2" ]] || { echo "QDRANT_COLLECTION_EG2 repository variable is required" >&2; exit 1; }
+          [[ "$QDRANT_COLLECTION" != "$QDRANT_COLLECTION_EG2" ]] || { echo "Source and destination collections must differ" >&2; exit 1; }
+
+      - name: Resume migration into the separate collection
+        run: ./ML_Research_RAG/bin/python migrate_embeddinggemma2.py --resume
+
+  resume_after_hosted_timeout:
+    needs: migrate
+    # Hosted jobs stop at six hours; continue safely from durable Qdrant point IDs.
+    if: ${{ always() && needs.migrate.result == 'failure' }}
+    runs-on: macos-latest-xlarge
+    timeout-minutes: 360
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: ${{ vars.QDRANT_COLLECTION }}
+      QDRANT_COLLECTION_EG2: ${{ vars.QDRANT_COLLECTION_EG2 }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_HOME: ${{ github.workspace }}/.hf_cache
+    steps:
+      - name: Check out migration code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore EmbeddingGemma 2 model cache
+        uses: actions/cache@v4
+        with:
+          path: .hf_cache
+          key: embeddinggemma2-hf-macos-arm64-v1
+
+      - name: Create the migration virtual environment
+        run: python -m venv ML_Research_RAG
+
+      - name: Install migration dependencies
+        run: |
+          ./ML_Research_RAG/bin/python -m pip install --upgrade pip
+          ./ML_Research_RAG/bin/python -m pip install "sentence-transformers>=6.1.0" qdrant-client python-dotenv numpy
+
+      - name: Validate required configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
+          [[ -n "$HF_TOKEN" ]] || { echo "HF_TOKEN secret is required for the gated model" >&2; exit 1; }
+          [[ -n "$QDRANT_COLLECTION" ]] || { echo "QDRANT_COLLECTION repository variable is required" >&2; exit 1; }
+          [[ -n "$QDRANT_COLLECTION_EG2" ]] || { echo "QDRANT_COLLECTION_EG2 repository variable is required" >&2; exit 1; }
+          [[ "$QDRANT_COLLECTION" != "$QDRANT_COLLECTION_EG2" ]] || { echo "Source and destination collections must differ" >&2; exit 1; }
+
+      - name: Resume migration into the separate collection
+        run: ./ML_Research_RAG/bin/python migrate_embeddinggemma2.py --resume

@@ -57,13 +57,14 @@ class ContextManager:
     def __init__(
         self,
         call_vector_db: Callable[[str, int], List[Dict]],
-        llm_call: Callable[[str], str],
+        llm_call: Callable[[str, str], str],
         llm_model: Any,  # LangChain LLM instance for summarization
         rerank_fn: Optional[Callable[[str, List[Dict], int], List[Dict]]] = None,
         short_term_max_messages: int = 10,
         summary_threshold: int = 8,
         token_budget: int = 3000,
         retrieve_k: int = 50,
+        final_k: int = 5,
         system_prompt: str = ''' You are an extremely intelligent assistant that answers user questions in depth  by  synthesizing information from the context provided.
 
 Follow these rules exactly for every response:
@@ -128,6 +129,7 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         self.summary_threshold = summary_threshold
         self.token_budget = token_budget
         self.retrieve_k = retrieve_k
+        self.final_k = final_k
         self.system_prompt = system_prompt
         
         # Initialize LangGraph workflow with memory
@@ -176,11 +178,22 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         """
         Rewrite the query to make it more specific.
         """
-        conversation_parts = self.conversation_history(state['messages'])
+        history_messages = state['messages']
+        if (
+            history_messages
+            and isinstance(history_messages[-1], HumanMessage)
+            and history_messages[-1].content == state['user_query']
+        ):
+            history_messages = history_messages[:-1]
+        conversation_parts = self.conversation_history(history_messages)
         conversation_block = "\n".join(conversation_parts) if conversation_parts else ""
 
-        # Generate the rewritten search query
-        search_query = self.llm_call(state['user_query'], conversation_block)
+        # Avoid an extra network LLM round trip on a new conversation.
+        search_query = (
+            self.llm_call(state['user_query'], conversation_block)
+            if conversation_block.strip()
+            else state['user_query']
+        )
         
         # Return only the updates (proper LangGraph pattern)
         return {"search_query": search_query}
@@ -232,6 +245,12 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         """Generate an answer using the prompt and context."""
         user_query = state["user_query"]
         conversation_history = state["messages"]
+        if (
+            conversation_history
+            and isinstance(conversation_history[-1], HumanMessage)
+            and conversation_history[-1].content == user_query
+        ):
+            conversation_history = conversation_history[:-1]
         retrieved_chunks = state["context"]
         
         prompt = self.build_prompt(
@@ -403,7 +422,7 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
         candidates = self.call_vector_db(query, k) # Add filter_meta here if supported
         
         if self.rerank_fn:
-            candidates = self.rerank_fn(query, candidates, top_k=k)
+            candidates = self.rerank_fn(query, candidates, top_k=self.final_k)
         
         return candidates
 
@@ -524,7 +543,7 @@ PLEASE  MAKE SURE THAT THE SOURCE IS READABLE AND THERE IS '_' BETWEEN EVERY WOR
                 new_parts.append(p)
         
         # Ensure context is added if it wasn't there before
-        if "RETRIEVED_CONTEXT" not in parts[2] and retrieved_parts:
+        if not any(p.startswith("RETRIEVED_CONTEXT") for p in parts) and retrieved_parts:
              new_parts.insert(-1, f"RETRIEVED_CONTEXT:\n\n{self._separator().join(retrieved_parts)}")
              
         return "\n\n".join(new_parts)
