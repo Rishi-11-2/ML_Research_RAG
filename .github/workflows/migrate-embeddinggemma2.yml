@@ -13,8 +13,8 @@ concurrency:
 
 jobs:
   migrate:
-    # GitHub-hosted Apple Silicon M2 runner with GPU acceleration.
-    runs-on: macos-latest-xlarge
+    # Standard GitHub-hosted Linux runner; avoids the paid macOS xlarge tier.
+    runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .hf_cache
-          key: embeddinggemma2-hf-macos-arm64-v1
+          key: embeddinggemma2-hf-ubuntu-x64-v1
 
       - name: Create the migration virtual environment
         run: python -m venv ML_Research_RAG
@@ -60,7 +60,7 @@ jobs:
     needs: migrate
     # Hosted jobs stop at six hours; continue safely from durable Qdrant point IDs.
     if: ${{ always() && needs.migrate.result == 'failure' }}
-    runs-on: macos-latest-xlarge
+    runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
@@ -81,7 +81,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .hf_cache
-          key: embeddinggemma2-hf-macos-arm64-v1
+          key: embeddinggemma2-hf-ubuntu-x64-v1
 
       - name: Create the migration virtual environment
         run: python -m venv ML_Research_RAG
