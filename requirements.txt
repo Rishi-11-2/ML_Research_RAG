@@ -6,9 +6,11 @@ litellm
 pandas
 pydantic
 sentence-transformers>=6.1.0
+pillow
+torchvision
 tiktoken
 streamlit
-qdrant-client
+qdrant-client>=1.15,<1.17
 aiohttp
 langgraph
 langchain>=0.3.0

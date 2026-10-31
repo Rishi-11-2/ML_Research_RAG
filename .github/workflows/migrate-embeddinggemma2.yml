@@ -44,7 +44,7 @@ jobs:
       - name: Install migration dependencies
         run: |
           ./ML_Research_RAG/bin/python -m pip install --upgrade pip
-          ./ML_Research_RAG/bin/python -m pip install "sentence-transformers>=6.1.0" qdrant-client python-dotenv numpy
+          ./ML_Research_RAG/bin/python -m pip install "sentence-transformers>=6.1.0" "qdrant-client>=1.15,<1.17" python-dotenv numpy pillow torchvision
 
       - name: Validate required configuration
         shell: bash
@@ -89,7 +89,7 @@ jobs:
       - name: Install migration dependencies
         run: |
           ./ML_Research_RAG/bin/python -m pip install --upgrade pip
-          ./ML_Research_RAG/bin/python -m pip install "sentence-transformers>=6.1.0" qdrant-client python-dotenv numpy
+          ./ML_Research_RAG/bin/python -m pip install "sentence-transformers>=6.1.0" "qdrant-client>=1.15,<1.17" python-dotenv numpy pillow torchvision
 
       - name: Validate required configuration
         shell: bash
