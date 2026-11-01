@@ -17,19 +17,29 @@ QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "document_chunks")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 EG2_COLLECTION = os.getenv("QDRANT_COLLECTION_EG2", f"{QDRANT_COLLECTION}_embeddinggemma2")
-ACTIVE_COLLECTION = EG2_COLLECTION if EMBEDDING_MODEL == "google/embeddinggemma-2" else QDRANT_COLLECTION
+HYPENCODER_COLLECTION = os.getenv("QDRANT_COLLECTION_HYPENCODER", f"{QDRANT_COLLECTION}_hypencoder")
+
+if EMBEDDING_MODEL in ("hypencoder", "jfkback/hypencoder.6_layer"):
+    ACTIVE_COLLECTION = HYPENCODER_COLLECTION
+elif EMBEDDING_MODEL == "google/embeddinggemma-2":
+    ACTIVE_COLLECTION = EG2_COLLECTION
+else:
+    ACTIVE_COLLECTION = QDRANT_COLLECTION
 
 if not QDRANT_URL:
     raise RuntimeError("QDRANT_URL must be set before starting the RAG application")
-client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY.strip() if QDRANT_API_KEY else None, prefer_grpc=False)
+client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY.strip() if QDRANT_API_KEY else None, timeout=30.0, prefer_grpc=False)
 
 #--------------------------
 # -----------------------
-embedder = SentenceTransformer(
-    EMBEDDING_MODEL,
-    **({"config_kwargs": {"vision_config": None, "audio_config": None}, "truncate_dim": 256}
-       if EMBEDDING_MODEL == "google/embeddinggemma-2" else {}),
-)
+if EMBEDDING_MODEL in ("hypencoder", "jfkback/hypencoder.6_layer"):
+    embedder = None
+else:
+    embedder = SentenceTransformer(
+        EMBEDDING_MODEL,
+        **({"config_kwargs": {"vision_config": None, "audio_config": None}, "truncate_dim": 256}
+           if EMBEDDING_MODEL == "google/embeddinggemma-2" else {}),
+    )
 cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
@@ -45,6 +55,8 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
 
 @lru_cache(maxsize=512)
 def _cached_query_embedding(query: str) -> np.ndarray:
+    if EMBEDDING_MODEL in ("hypencoder", "jfkback/hypencoder.6_layer"):
+        raise NotImplementedError("Hypencoder uses dynamic q-net scoring and graph retrieval, not static query embeddings.")
     if EMBEDDING_MODEL == "google/embeddinggemma-2":
         return embedder.encode(query, prompt_name="SearchQuery", normalize_embeddings=True)
     return embedder.encode(query, normalize_embeddings=True)
@@ -52,7 +64,18 @@ def _cached_query_embedding(query: str) -> np.ndarray:
 
 def embed_document(text: str, title: str = "none") -> np.ndarray:
     """Embed a document using the same model and task prompt as query-time retrieval."""
-    if EMBEDDING_MODEL == "google/embeddinggemma-2":
+    if EMBEDDING_MODEL in ("hypencoder", "jfkback/hypencoder.6_layer"):
+        import torch
+        from hypencoder_retriever import load_hypencoder
+        model, tokenizer = load_hypencoder()
+        inputs = tokenizer([text], return_tensors="pt", padding=True, truncation=True, max_length=512)
+        with torch.no_grad():
+            output = model.passage_encoder(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+            )
+            return output.representation[0].cpu().numpy()
+    elif EMBEDDING_MODEL == "google/embeddinggemma-2":
         return embedder.encode(
             f"title: {title or 'none'} | text: {text}",
             prompt_name="Document",
@@ -95,13 +118,31 @@ def cross_encoder_rerank(query: str, docs: List, top_k: int = 5) -> List[dict]:
     return results[:top_k]
 
 
-def call_vector_db(query: str, k: int) -> List[dict]:
-    """
-    
+_hypencoder_retriever = None
 
-    uses the dense and sparse vectors, with their results combined
-    using the Reciprocal Rank Fusion.
+def get_hypencoder_retriever():
+    global _hypencoder_retriever
+    if _hypencoder_retriever is None:
+        from hypencoder_retriever import HypencoderGraphRetriever
+        _hypencoder_retriever = HypencoderGraphRetriever(
+            client=client,
+            collection_name=ACTIVE_COLLECTION,
+        )
+    return _hypencoder_retriever
+
+
+def call_vector_db(query: str, k: int) -> List[dict]:
+    """Retrieve relevant document chunks.
+
+    When EMBEDDING_MODEL is Hypencoder, executes Python graph traversal over
+    Hypencoder passage embeddings and 100-neighbor graph in Qdrant scored by
+    dynamically generated q-net.
+    Otherwise, performs dense vector search in Qdrant.
     """
+    if EMBEDDING_MODEL in ("hypencoder", "jfkback/hypencoder.6_layer"):
+        retriever = get_hypencoder_retriever()
+        return retriever.retrieve(query=query, k=k)
+
     query_vec = _cached_query_embedding(query)
     # client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_grpc=False)
     # Search Qdrant
@@ -122,19 +163,19 @@ def call_vector_db(query: str, k: int) -> List[dict]:
         score = getattr(hit, "score", None)
 
         text = payload.get("text")
-        meta = {k: v for k, v in payload.items() if k not in ("text",  "source", "_stable_id")}
+        meta = {k: v for k, v in payload.items() if k not in ("text",  "source", "_stable_id", "neighbors")}
 
-        source = payload.get("source")
+        source = payload.get("source") or payload.get("filename")
         score_f = float(score) if score is not None else 0.0
 
 
         # print(source)
-        pid_str = payload.get("_stable_id")
+        pid_str = payload.get("_stable_id") or str(getattr(hit, "id", ""))
 
         # print(pid_str, meta,score_f)
         out.append({
             "id": pid_str,
-            "source":source,
+            "source": source,
             "text": text,
             "score": score_f,
             "metadata": meta,

@@ -138,6 +138,59 @@ graph TD
 | `token_budget` | 3000 | Maximum tokens allowed in the LLM prompt |
 | `summary_threshold` | 8 | Number of messages before summarization triggers |
 
+### Hypencoder RAG Migration (arXiv:2502.05364)
+
+Hypencoder replaces static vector inner products with query-specific dynamic scoring neural networks (**q-nets**). A hypernetwork dynamically generates the weights of a scoring network for each query, which then evaluates passage representations produced by Hypencoder's passage encoder. Retrieval is performed using graph traversal over a 100-nearest neighbor graph constructed in Euclidean (L2) space for your corpus.
+
+#### Architecture Comparison
+
+- **Current (Bi-Encoder):**
+  User Query $\to$ Query Embedding Model $\to$ Vector Inner-Product / Cosine Search in Qdrant $\to$ Reranker $\to$ LLM
+- **Proposed (Hypencoder):**
+  User Query $\to$ Hypencoder Query Encoder ($\to$ `q-net`) $\to$ Python Graph Traversal over Qdrant Chunks + 100-Neighbor Graph $\to$ Top-K Chunks $\to$ Existing LLM
+
+#### Migration & Setup
+
+1. **Migrate Embeddings & Build 100-Neighbor Graph in Qdrant:**
+   ```bash
+   ./ML_Research_RAG/bin/python migrate_hypencoder.py --resume
+   ```
+   This generates 768-dimensional document vectors with `jfkback/hypencoder.6_layer` passage encoder, builds a 100-nearest neighbor graph for the corpus, and stores them in `document_chunks_hypencoder`. The source collection remains untouched.
+
+2. **Verify Hypencoder Collection:**
+   ```bash
+   ./ML_Research_RAG/bin/python check_hypencoder_status.py
+   ```
+
+3. **Activate Hypencoder Retrieval:**
+   Set in `.env`:
+   ```env
+   EMBEDDING_MODEL=jfkback/hypencoder.6_layer
+   QDRANT_COLLECTION_HYPENCODER=document_chunks_hypencoder
+   ```
+
+---
+
+### Zilliz Cloud (Milvus) Migration & Cron Job
+
+For cloud-native vector storage and scaling, data can be migrated to **Zilliz Cloud (Milvus)** using the automated pipeline:
+
+- **Local Migration Command:**
+  ```bash
+  ./ML_Research_RAG/bin/python migrate_to_zilliz.py --resume
+  ```
+  Credentials can be loaded directly from environment variables (`ZILLIZ_URI`, `ZILLIZ_TOKEN`) or the local `./zilliz_token/token.txt` directory.
+
+- **Check Migration Status:**
+  ```bash
+  ./ML_Research_RAG/bin/python check_zilliz_migration_status.py
+  ```
+
+- **Automated GitHub Actions Workflow:**
+  A scheduled GitHub Actions cron job is provided in [`.github/workflows/migrate-to-zilliz.yml`](.github/workflows/migrate-to-zilliz.yml). It runs every 6 hours (`cron: "25 */6 * * *"`) to synchronize points from Qdrant into Zilliz Cloud, with automatic resumption and validation against repository secrets `ZILLIZ_URI` and `ZILLIZ_TOKEN`.
+
+---
+
 ### EmbeddingGemma 2 migration
 
 EmbeddingGemma 2 uses a different vector space from MiniLM. Existing Qdrant vectors must be regenerated; changing only the query model will make retrieval invalid. The included migration command writes to a separate collection, retains point IDs and payloads, checks the final point count, and never modifies or deletes the source collection.

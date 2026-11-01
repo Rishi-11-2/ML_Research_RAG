@@ -7,3 +7,5 @@ papers/
 papers_temp/
 interview.txt
 interview_answers.md
+zilliz_token/
+.DS_Store
