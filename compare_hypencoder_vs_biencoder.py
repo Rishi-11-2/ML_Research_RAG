@@ -8,6 +8,7 @@ Evaluates both approaches on:
 
 import json
 import os
+import random
 import statistics
 import time
 from typing import Any, Dict, List, Set, Tuple
@@ -18,42 +19,8 @@ from qdrant_client import QdrantClient
 from sentence_transformers import CrossEncoder, SentenceTransformer
 import torch
 
+from benchmark_hypencoder_large import MINIMUM_QUERY_COUNT, build_benchmark_queries
 from hypencoder_retriever import HypencoderGraphRetriever, load_hypencoder
-
-BENCHMARK_QUERIES = [
-    {
-        "query": "Which technical report introduced Torch modular machine learning software library?",
-        "relevant_ids": ["The need for open source software in machine learning.pdf::84.0::88dccca4e580"],
-    },
-    {
-        "query": "How is reinforcement learning theory formalized using the Robbins-Siegmund approach?",
-        "relevant_ids": ["Towards Formalizing Reinforcement Learning Theory_ A Robbins-Siegmund Approach.pdf::49.0::194c2aab03fc"],
-    },
-    {
-        "query": "What was the goal of the FP7 ACROPOLIS project in cognitive radio spectrum sharing?",
-        "relevant_ids": ["Reinforcement Learning-based Spectrum Sharing for Cognitive Radio.pdf::158.0::37636ed8d7e7"],
-    },
-    {
-        "query": "How does agentic artificial intelligence socialization evaluate task division and trust building?",
-        "relevant_ids": ["Beauty or the Borg_Agentic Artificial Intelligence Organizational Socialization in Synergistic Hybrid Transformative Dynamic Flows.pdf::73.0::d33f41c9b88e"],
-    },
-    {
-        "query": "How does generalized Earley parser bridge symbolic grammars and sequence data for prediction?",
-        "relevant_ids": ["Generalized Earley Parser_ Bridging Symbolic Grammars and Sequence Data for Future Prediction::chunk::12.0::ece1090ed768"],
-    },
-    {
-        "query": "How do facial-preserving diffusion models evaluate custom graffiti art image editing?",
-        "relevant_ids": ["CraftGraffiti-ExploringHumanIdentitywithCustomGraffitiArtviaFacial-PreservingDiffusionModels::chunk::26.0::dbe42a6be15f"],
-    },
-    {
-        "query": "How is multi-source retrieval-augmented generation evaluated with BM25 and Llama models?",
-        "relevant_ids": ["MSRS-EvaluatingMulti-SourceRetrieval-AugmentedGeneration::chunk::188.0::828f051b25b7"],
-    },
-    {
-        "query": "How is the full model selection problem framed in meta-learning across winequality and datasets?",
-        "relevant_ids": ["Meta-Learning and the Full Model Selection Problem.pdf::236.1::86e7913a6368"],
-    },
-]
 
 
 def compute_metrics(ranked_ids: List[str], relevant_ids: Set[str], k: int) -> Tuple[float, float, float]:
@@ -192,6 +159,14 @@ def main():
     url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY")
     client = QdrantClient(url=url, api_key=api_key.strip() if api_key else None, prefer_grpc=False, timeout=30.0)
+    queries = build_benchmark_queries(
+        client,
+        os.getenv("QDRANT_COLLECTION_HYPENCODER", "document_chunks_hypencoder"),
+        MINIMUM_QUERY_COUNT,
+    )
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
 
     print("Loading reranker model...")
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -203,7 +178,7 @@ def main():
         collection="document_chunks",  # Source 384-dim MiniLM collection
         minilm_model=minilm,
         reranker=reranker,
-        queries=BENCHMARK_QUERIES,
+        queries=queries,
         candidate_k=15,
         final_k=3,
     )
@@ -215,12 +190,12 @@ def main():
         collection_name="document_chunks_hypencoder",
         model=model,
         tokenizer=tokenizer,
-        preload_limit=500,
+        preload_limit=MINIMUM_QUERY_COUNT,
     )
     hypencoder_results = evaluate_hypencoder(
         retriever=retriever,
         reranker=reranker,
-        queries=BENCHMARK_QUERIES,
+        queries=queries,
         candidate_k=15,
         final_k=3,
     )
@@ -228,7 +203,7 @@ def main():
     print("\n" + "=" * 60)
     print("               BENCHMARK EVALUATION SUMMARY")
     print("=" * 60)
-    print(f"Number of test queries: {len(BENCHMARK_QUERIES)}")
+    print(f"Number of corpus-derived query probes: {len(queries):,}")
     print("\n[Metric Comparison]")
     print(f"{'Metric':<28} | {'Bi-Encoder (MiniLM)':<20} | {'Hypencoder':<20} | {'Gain / Delta':<15}")
     print("-" * 90)

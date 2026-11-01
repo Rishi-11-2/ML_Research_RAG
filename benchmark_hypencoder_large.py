@@ -1,14 +1,17 @@
-"""Large-scale end-to-end benchmark comparing Hypencoder and Bi-Encoder (MiniLM).
+"""Compare Hypencoder and MiniLM with reproducible corpus-derived query probes.
 
-Runs over an expanded corpus (e.g., 1,000+ chunks) with ground-truth labeled queries
-from across the research paper corpus, reporting Recall@K, Precision@K, MRR,
-and latency breakdown. Generates GitHub Step Summary if running in GitHub Actions.
+Builds at least 10,000 unique extractive queries from migrated Hypencoder passages,
+labels each query with its source chunk, and reports retrieval/reranking metrics and
+latency. These probes support a large workload benchmark; they are not human-authored
+relevance judgments. Generates a GitHub Step Summary when running in Actions.
 """
 
 import argparse
+import hashlib
 import json
 import os
-from pathlib import Path
+import random
+import re
 import statistics
 import time
 from typing import Any, Dict, List, Set, Tuple
@@ -21,40 +24,70 @@ import torch
 
 from hypencoder_retriever import HypencoderGraphRetriever, load_hypencoder
 
-BENCHMARK_QUERIES = [
-    {
-        "query": "Which technical report introduced Torch modular machine learning software library?",
-        "relevant_ids": ["The need for open source software in machine learning.pdf::84.0::88dccca4e580"],
-    },
-    {
-        "query": "How is reinforcement learning theory formalized using the Robbins-Siegmund approach?",
-        "relevant_ids": ["Towards Formalizing Reinforcement Learning Theory_ A Robbins-Siegmund Approach.pdf::49.0::194c2aab03fc"],
-    },
-    {
-        "query": "What was the goal of the FP7 ACROPOLIS project in cognitive radio spectrum sharing?",
-        "relevant_ids": ["Reinforcement Learning-based Spectrum Sharing for Cognitive Radio.pdf::158.0::37636ed8d7e7"],
-    },
-    {
-        "query": "How does agentic artificial intelligence socialization evaluate task division and trust building?",
-        "relevant_ids": ["Beauty or the Borg_Agentic Artificial Intelligence Organizational Socialization in Synergistic Hybrid Transformative Dynamic Flows.pdf::73.0::d33f41c9b88e"],
-    },
-    {
-        "query": "How does generalized Earley parser bridge symbolic grammars and sequence data for prediction?",
-        "relevant_ids": ["Generalized Earley Parser_ Bridging Symbolic Grammars and Sequence Data for Future Prediction::chunk::12.0::ece1090ed768"],
-    },
-    {
-        "query": "How do facial-preserving diffusion models evaluate custom graffiti art image editing?",
-        "relevant_ids": ["CraftGraffiti-ExploringHumanIdentitywithCustomGraffitiArtviaFacial-PreservingDiffusionModels::chunk::26.0::dbe42a6be15f"],
-    },
-    {
-        "query": "How is multi-source retrieval-augmented generation evaluated with BM25 and Llama models?",
-        "relevant_ids": ["MSRS-EvaluatingMulti-SourceRetrieval-AugmentedGeneration::chunk::188.0::828f051b25b7"],
-    },
-    {
-        "query": "How is the full model selection problem framed in meta-learning across winequality and datasets?",
-        "relevant_ids": ["Meta-Learning and the Full Model Selection Problem.pdf::236.1::86e7913a6368"],
-    },
-]
+MINIMUM_QUERY_COUNT = 10_000
+QUERY_SCROLL_PAGE_SIZE = 1000
+
+
+def build_benchmark_queries(client, collection: str, query_count: int) -> List[Dict[str, Any]]:
+    """Build reproducible, corpus-derived probes with their source chunk as a positive label."""
+    queries: List[Dict[str, Any]] = []
+    seen_queries: Set[str] = set()
+    offset = None
+
+    while len(queries) < query_count:
+        points, next_offset = client.scroll(
+            collection_name=collection,
+            limit=min(QUERY_SCROLL_PAGE_SIZE, query_count - len(queries)),
+            offset=offset,
+            with_payload=["text", "filename", "source", "_stable_id"],
+            with_vectors=False,
+        )
+        if not points:
+            break
+
+        for point in points:
+            payload = point.payload or {}
+            text = payload.get("text")
+            if not isinstance(text, str) or len(text.split()) < 8:
+                continue
+
+            chunk_id = str(payload.get("_stable_id") or point.id)
+            sentences = [
+                re.sub(r"\s+", " ", sentence).strip()
+                for sentence in re.split(r"(?<=[.!?])\s+|[\r\n]+", text)
+                if len(sentence.split()) >= 8
+            ]
+            seed = hashlib.sha256(chunk_id.encode("utf-8")).digest()
+            snippet = sentences[int.from_bytes(seed[:4], "big") % len(sentences)] if sentences else text
+            snippet = " ".join(snippet.split()[:36]).strip(" \t\r\n.,;:")
+
+            paper = payload.get("filename") or payload.get("source") or "the research paper"
+            paper = re.sub(r"[_-]+", " ", os.path.splitext(os.path.basename(str(paper)))[0]).strip()
+            template = int.from_bytes(seed[4:8], "big") % 3
+            query = (
+                f"What does {paper} report about {snippet}?"
+                if template == 0
+                else f"Find the research passage about {snippet} from {paper}."
+                if template == 1
+                else f"According to {paper}, what is explained by: {snippet}?"
+            )
+            if query in seen_queries:
+                continue
+            seen_queries.add(query)
+            queries.append({"query": query, "relevant_ids": [chunk_id]})
+            if len(queries) == query_count:
+                break
+
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    if len(queries) < query_count:
+        raise RuntimeError(
+            f"Requested {query_count} unique queries but built only {len(queries)} from {collection!r}. "
+            "Increase the Hypencoder collection size or check that its points have text and stable IDs."
+        )
+    return queries
 
 
 def compute_metrics(ranked_ids: List[str], relevant_ids: Set[str], k: int) -> Tuple[float, float, float]:
@@ -191,8 +224,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-k", type=int, default=20, help="Candidate pool size (default: 20)")
     parser.add_argument("--final-k", type=int, default=5, help="Final reranked pool size (default: 5)")
+    parser.add_argument(
+        "--query-count",
+        type=int,
+        default=MINIMUM_QUERY_COUNT,
+        help=f"Number of unique corpus-derived query probes (minimum {MINIMUM_QUERY_COUNT})",
+    )
     parser.add_argument("--output-json", default="benchmark_results.json", help="Path to save results JSON")
     args = parser.parse_args()
+    if args.query_count < MINIMUM_QUERY_COUNT:
+        parser.error(f"--query-count must be at least {MINIMUM_QUERY_COUNT}")
 
     url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY")
@@ -209,6 +250,21 @@ def main():
 
     print(f"Total source corpus size: {src_count} chunks")
     print(f"Hypencoder collection size: {hyp_count} chunks")
+    if hyp_count < args.query_count:
+        raise RuntimeError(
+            f"Need at least {args.query_count} migrated Hypencoder chunks to build that many labeled queries; "
+            f"the collection has {hyp_count}. Increase --limit in migrate_hypencoder.py."
+        )
+
+    print(f"\nBuilding {args.query_count:,} deterministic query probes from Hypencoder passages...")
+    queries = build_benchmark_queries(client, hyp_coll, args.query_count)
+    query_set_sha256 = hashlib.sha256(
+        "\n".join(
+            json.dumps(query, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            for query in queries
+        ).encode("utf-8")
+    ).hexdigest()
+    print(f"Built {len(queries):,} unique corpus-derived queries.")
 
     print("\nLoading models for benchmark...")
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -220,13 +276,16 @@ def main():
         collection=src_coll,
         minilm=minilm,
         reranker=reranker,
-        queries=BENCHMARK_QUERIES,
+        queries=queries,
         candidate_k=args.candidate_k,
         final_k=args.final_k,
     )
 
     print("\n--- Evaluating Hypencoder (q-net + Graph Traversal) ---")
     model, tokenizer = load_hypencoder()
+    random.seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
     retriever = HypencoderGraphRetriever(
         client=client,
         collection_name=hyp_coll,
@@ -237,7 +296,7 @@ def main():
     hyp_res = evaluate_hypencoder(
         retriever=retriever,
         reranker=reranker,
-        queries=BENCHMARK_QUERIES,
+        queries=queries,
         candidate_k=args.candidate_k,
         final_k=args.final_k,
     )
@@ -245,7 +304,9 @@ def main():
     summary_md = f"""# 🚀 End-to-End Retrieval Benchmark Results
 
 - **Corpus evaluated:** `{hyp_count}` Hypencoder chunks vs `{src_count}` source chunks
-- **Test queries:** `{len(BENCHMARK_QUERIES)}` domain-specific ML research questions
+- **Test queries:** `{len(queries):,}` reproducible corpus-derived probes (one positive source chunk each)
+- **Query type:** Extractive synthetic probes for retrieval/load benchmarking; not human-authored QA judgments
+- **Query set SHA-256:** `{query_set_sha256}`
 - **Candidate Pool ($K$):** `{args.candidate_k}`
 - **Final Reranked Context ($K$):** `{args.final_k}`
 
@@ -272,6 +333,10 @@ def main():
 
     # Save outputs
     output_data = {
+        "query_count": len(queries),
+        "query_type": "corpus-derived extractive probes; one positive source chunk per query",
+        "query_set_sha256": query_set_sha256,
+        "hypencoder_random_seed": 0,
         "candidate_k": args.candidate_k,
         "final_k": args.final_k,
         "source_corpus_count": src_count,

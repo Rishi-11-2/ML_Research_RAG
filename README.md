@@ -169,6 +169,8 @@ Hypencoder replaces static vector inner products with query-specific dynamic sco
    QDRANT_COLLECTION_HYPENCODER=document_chunks_hypencoder
    ```
 
+4. **Run the Hypencoder benchmark:** The `Benchmark Hypencoder vs Bi-Encoder` GitHub Actions workflow migrates at least 10,000 chunks by default and builds 10,000 deterministic query probes from those passages. Each probe is labeled with its source chunk. These corpus-derived probes measure retrieval/load behavior; they are not human-authored relevance judgments. Increase both `chunk_limit` and `query_count` together if you want a larger benchmark.
+
 ---
 
 ### Zilliz Cloud (Milvus) Migration & Cron Job

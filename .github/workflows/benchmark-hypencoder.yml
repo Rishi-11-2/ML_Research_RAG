@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       chunk_limit:
-        description: "Number of corpus chunks to migrate & evaluate"
+        description: "Number of corpus chunks to migrate (must be at least the query count)"
         required: true
-        default: "500"
+        default: "10000"
+      query_count:
+        description: "Number of distinct corpus-derived benchmark queries (minimum 10000)"
+        required: true
+        default: "10000"
       candidate_k:
         description: "Candidate pool size (K)"
         required: true
@@ -26,7 +30,7 @@ concurrency:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     env:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
@@ -62,13 +66,28 @@ jobs:
           set -euo pipefail
           [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
 
+      - name: Validate corpus and query counts
+        env:
+          CHUNK_LIMIT: ${{ inputs.chunk_limit }}
+          QUERY_COUNT: ${{ inputs.query_count }}
+        run: |
+          python - <<'PY'
+          import os
+          chunk_limit = int(os.environ["CHUNK_LIMIT"])
+          query_count = int(os.environ["QUERY_COUNT"])
+          if query_count < 10000:
+              raise SystemExit("query_count must be at least 10000")
+          if chunk_limit < query_count:
+              raise SystemExit("chunk_limit must be greater than or equal to query_count")
+          PY
+
       - name: Migrate chunks & build neighbor graph for corpus
         run: |
           python migrate_hypencoder.py --limit ${{ inputs.chunk_limit }} --resume
 
       - name: Run end-to-end benchmark
         run: |
-          python benchmark_hypencoder_large.py --candidate-k ${{ inputs.candidate_k }} --final-k ${{ inputs.final_k }}
+          python benchmark_hypencoder_large.py --query-count ${{ inputs.query_count }} --candidate-k ${{ inputs.candidate_k }} --final-k ${{ inputs.final_k }}
 
       - name: Upload benchmark artifacts
         if: always()
