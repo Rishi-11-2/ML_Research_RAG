@@ -35,7 +35,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install clients
-        run: python -m pip install "qdrant-client>=1.15,<1.17" "pymilvus>=2.4.0" python-dotenv
+        run: python -m pip install "qdrant-client>=1.15,<1.17" "pymilvus>=2.4.0" python-dotenv tqdm
 
       - name: Check whether Zilliz migration is complete
         id: check
