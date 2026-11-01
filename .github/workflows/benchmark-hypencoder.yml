@@ -3,10 +3,10 @@ name: Benchmark Hypencoder vs Bi-Encoder
 on:
   workflow_dispatch:
     inputs:
-      chunk_limit:
-        description: "Number of corpus chunks to migrate & evaluate"
+      query_count:
+        description: "Number of distinct corpus-derived benchmark queries (minimum 10000)"
         required: true
-        default: "500"
+        default: "10000"
       candidate_k:
         description: "Candidate pool size (K)"
         required: true
@@ -26,7 +26,7 @@ concurrency:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     env:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
@@ -56,19 +56,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "torch>=2.0" "transformers>=4.48" "sentence-transformers>=6.1.0" "qdrant-client>=1.15,<1.17" python-dotenv tqdm numpy
 
-      - name: Validate Qdrant secrets
+      - name: Validate Qdrant secret and query count
         shell: bash
+        env:
+          QUERY_COUNT: ${{ inputs.query_count }}
         run: |
           set -euo pipefail
           [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
-
-      - name: Migrate chunks & build neighbor graph for corpus
-        run: |
-          python migrate_hypencoder.py --limit ${{ inputs.chunk_limit }} --resume
+          [[ "$QUERY_COUNT" =~ ^[0-9]+$ ]] || { echo "query_count must be an integer" >&2; exit 1; }
+          (( QUERY_COUNT >= 10000 )) || { echo "query_count must be at least 10000" >&2; exit 1; }
 
       - name: Run end-to-end benchmark
+        env:
+          QUERY_COUNT: ${{ inputs.query_count }}
+          CANDIDATE_K: ${{ inputs.candidate_k }}
+          FINAL_K: ${{ inputs.final_k }}
         run: |
-          python benchmark_hypencoder_large.py --candidate-k ${{ inputs.candidate_k }} --final-k ${{ inputs.final_k }}
+          python benchmark_hypencoder_large.py --query-count "$QUERY_COUNT" --candidate-k "$CANDIDATE_K" --final-k "$FINAL_K"
 
       - name: Upload benchmark artifacts
         if: always()
