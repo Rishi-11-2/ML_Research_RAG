@@ -48,8 +48,9 @@ def build_benchmark_queries(client, collection: str, query_count: int) -> List[D
         for point in points:
             payload = point.payload or {}
             text = payload.get("text")
-            if not isinstance(text, str) or len(text.split()) < 8:
+            if not isinstance(text, str) or not text.strip():
                 continue
+            text = re.sub(r"\s+", " ", text).strip()
 
             chunk_id = str(payload.get("_stable_id") or point.id)
             sentences = [
