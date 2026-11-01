@@ -2,6 +2,8 @@ name: Migrate Qdrant to EmbeddingGemma 2
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */2 * * *"
 
 permissions:
   contents: read
@@ -12,7 +14,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  migration_status:
+    runs-on: ubuntu-latest
+    outputs:
+      complete: ${{ steps.check.outputs.complete }}
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_EG2: document_chunks_embeddinggemma2
+    steps:
+      - name: Check out migration code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Qdrant client
+        run: python -m pip install "qdrant-client>=1.15,<1.17"
+
+      - name: Check whether migration is complete
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(python check_migration_status.py)"
+          echo "complete=$status" >> "$GITHUB_OUTPUT"
+          echo "EmbeddingGemma 2 collection complete: $status"
+
   migrate:
+    needs: migration_status
+    if: needs.migration_status.outputs.complete != 'true'
     # Standard GitHub-hosted Linux runner; avoids the paid macOS xlarge tier.
     runs-on: ubuntu-latest
     timeout-minutes: 360
