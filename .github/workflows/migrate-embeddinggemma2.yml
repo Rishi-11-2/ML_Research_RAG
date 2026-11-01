@@ -3,7 +3,7 @@ name: Migrate Qdrant to EmbeddingGemma 2
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: read
