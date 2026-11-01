@@ -12,15 +12,28 @@ def main() -> int:
     load_dotenv()
     url = os.getenv("QDRANT_URL")
     if not url:
-        raise RuntimeError("QDRANT_URL must be configured")
+        print("QDRANT_URL must be configured", file=sys.stderr)
+        print("false")
+        return 0
 
     source_name = os.getenv("QDRANT_COLLECTION", "document_chunks")
     target_name = os.getenv("QDRANT_COLLECTION_HYPENCODER", f"{source_name}_hypencoder")
     api_key = os.getenv("QDRANT_API_KEY")
     client = QdrantClient(url=url, api_key=api_key.strip() if api_key else None, timeout=30.0, prefer_grpc=False)
 
+    if not client.collection_exists(source_name):
+        print(f"Source collection {source_name!r} does not exist.", file=sys.stderr)
+        print("false")
+        return 0
+
     if not client.collection_exists(target_name):
-        print(f"Target collection {target_name!r} does not exist.")
+        print(f"Target collection {target_name!r} does not exist.", file=sys.stderr)
+        print("false")
+        return 0
+
+    source_count = client.count(source_name, exact=True).count
+    if source_count == 0:
+        print(f"Source collection {source_name!r} is empty.", file=sys.stderr)
         print("false")
         return 0
 
@@ -28,22 +41,25 @@ def main() -> int:
     vectors = target_info.config.params.vectors
 
     if isinstance(vectors, dict):
-        print(f"Collection {target_name!r} uses named vectors, expected single dense vector.")
+        print(f"Collection {target_name!r} uses named vectors, expected single dense vector.", file=sys.stderr)
         print("false")
         return 0
 
     if vectors.size != TARGET_DIMENSION:
-        print(f"Vector size {vectors.size} does not match target {TARGET_DIMENSION}.")
+        print(f"Vector size {vectors.size} does not match target {TARGET_DIMENSION}.", file=sys.stderr)
         print("false")
         return 0
 
     if vectors.distance != models.Distance.EUCLID:
-        print(f"Vector distance {vectors.distance} does not match {models.Distance.EUCLID}.")
+        print(f"Vector distance {vectors.distance} does not match {models.Distance.EUCLID}.", file=sys.stderr)
         print("false")
         return 0
 
     target_count = client.count(target_name, exact=True).count
-    print(f"Collection {target_name!r} verified: {target_count} points, dim={vectors.size}, distance={vectors.distance}")
+    print(
+        f"Collection {target_name!r} verified: {target_count}/{source_count} points, dim={vectors.size}, distance={vectors.distance}",
+        file=sys.stderr,
+    )
 
     # Check sample point
     points, _ = client.scroll(target_name, limit=1, with_payload=True, with_vectors=False)
@@ -51,9 +67,15 @@ def main() -> int:
         sample = points[0]
         has_neighbors = "neighbors" in (sample.payload or {})
         num_neighbors = len(sample.payload.get("neighbors", [])) if has_neighbors else 0
-        print(f"Sample point ID: {sample.id}, has_neighbors={has_neighbors}, neighbor_count={num_neighbors}")
+        print(
+            f"Sample point ID: {sample.id}, has_neighbors={has_neighbors}, neighbor_count={num_neighbors}",
+            file=sys.stderr,
+        )
 
-    print("true")
+    if target_count >= source_count:
+        print("true")
+    else:
+        print("false")
     return 0
 
 
@@ -62,4 +84,5 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as exc:
         print(f"Check error: {exc}", file=sys.stderr)
-        sys.exit(1)
+        print("false")
+        sys.exit(0)

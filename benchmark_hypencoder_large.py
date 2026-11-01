@@ -48,8 +48,9 @@ def build_benchmark_queries(client, collection: str, query_count: int) -> List[D
         for point in points:
             payload = point.payload or {}
             text = payload.get("text")
-            if not isinstance(text, str) or len(text.split()) < 8:
+            if not isinstance(text, str) or not text.strip():
                 continue
+            text = re.sub(r"\s+", " ", text).strip()
 
             chunk_id = str(payload.get("_stable_id") or point.id)
             sentences = [
@@ -64,15 +65,19 @@ def build_benchmark_queries(client, collection: str, query_count: int) -> List[D
             paper = payload.get("filename") or payload.get("source") or "the research paper"
             paper = re.sub(r"[_-]+", " ", os.path.splitext(os.path.basename(str(paper)))[0]).strip()
             template = int.from_bytes(seed[4:8], "big") % 3
-            query = (
+            base_query = (
                 f"What does {paper} report about {snippet}?"
                 if template == 0
                 else f"Find the research passage about {snippet} from {paper}."
                 if template == 1
                 else f"According to {paper}, what is explained by: {snippet}?"
             )
-            if query in seen_queries:
-                continue
+            query = base_query
+            collision_index = 1
+            point_marker = hashlib.sha256(str(point.id).encode("utf-8")).hexdigest()[:10]
+            while query in seen_queries:
+                query = f"{base_query} [passage ref {point_marker}-{collision_index}]"
+                collision_index += 1
             seen_queries.add(query)
             queries.append({"query": query, "relevant_ids": [chunk_id]})
             if len(queries) == query_count:

@@ -1,11 +1,14 @@
-"""Migrate document chunks to a Hypencoder Qdrant collection with a 100-neighbor graph.
+"""Migrate document chunks to a Hypencoder Qdrant collection with nearest-neighbor graphs.
 
-This script implements Section 4 of the Hypencoder integration strategy:
-1. Creates a separate Qdrant collection with 768-dim Euclidean distance.
-2. Encodes passage chunks using Hypencoder's passage encoder (jfkback/hypencoder.6_layer).
-3. Constructs a 100-nearest neighbor graph for the corpus using L2 distance in embedding space.
-4. Stores vectors and payloads (including the 'neighbors' list of neighbor IDs) in Qdrant.
-5. Retains the original source collection completely untouched.
+This script implements streaming, resumable migration for Hypencoder:
+1. Validates or creates the target Qdrant collection with 768-dim Euclidean distance.
+2. Quickly collects existing target point IDs to skip already migrated points immediately.
+3. Streams unmigrated points from the source collection in configurable chunk sizes (default 2500).
+4. Encodes passage chunks using Hypencoder's passage encoder (jfkback/hypencoder.6_layer).
+5. Constructs a k-nearest neighbor graph (default 100 neighbors) connecting each chunk to
+   the corpus pool using Euclidean distance in Hypencoder embedding space.
+6. Upserts points with 768-dim vectors and payloads (including the 'neighbors' list) to Qdrant.
+7. Leaves the source collection completely untouched.
 """
 
 import argparse
@@ -25,8 +28,10 @@ from hypencoder_retriever import load_hypencoder, DEFAULT_MODEL_NAME, get_defaul
 
 TARGET_DIMENSION = 768
 DEFAULT_K_NEIGHBORS = 100
-DEFAULT_SCROLL_PAGE = 256
+DEFAULT_SCROLL_PAGE = 500
 DEFAULT_EMBED_BATCH = 16
+DEFAULT_CHUNK_SIZE = 2500
+MAX_POOL_SIZE = 25000
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,10 +64,16 @@ def parse_args() -> argparse.Namespace:
         help="Batch size for passage encoding (default: 16)",
     )
     parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help="Number of chunks to embed, graph-link, and upsert per streaming batch (default: 2500)",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="Optional limit on number of points to migrate (for testing)",
+        help="Optional limit on number of points to migrate in this run (for testing/partial runs)",
     )
     parser.add_argument(
         "--resume",
@@ -78,48 +89,50 @@ def parse_args() -> argparse.Namespace:
 
 
 def compute_neighbor_graph(
-    embeddings: torch.Tensor,
-    point_ids: List[Any],
+    chunk_embeddings: torch.Tensor,
+    chunk_ids: List[Any],
+    pool_embeddings: torch.Tensor,
+    pool_ids: List[Any],
     k_neighbors: int = DEFAULT_K_NEIGHBORS,
     batch_size: int = 256,
 ) -> Dict[Any, List[Any]]:
-    """Compute k nearest neighbors in Euclidean space for every embedding.
+    """Compute k nearest neighbors in Euclidean space for chunk points against the pool.
 
     Args:
-        embeddings: Tensor of shape (N, 768).
-        point_ids: List of point IDs of length N.
+        chunk_embeddings: Tensor of shape (M, 768) for points being migrated.
+        chunk_ids: List of point IDs of length M.
+        pool_embeddings: Tensor of shape (P, 768) representing search pool.
+        pool_ids: List of point IDs of length P in the search pool.
         k_neighbors: Number of nearest neighbors to find for each point.
         batch_size: Batch size for pairwise distance calculation.
 
     Returns:
-        Dict mapping each point_id to a list of neighbor point_ids.
+        Dict mapping each chunk point_id to a list of neighbor point_ids.
     """
-    n_points = embeddings.shape[0]
-    if n_points <= 1:
-        return {pid: [] for pid in point_ids}
+    n_chunk = chunk_embeddings.shape[0]
+    n_pool = pool_embeddings.shape[0]
+    if n_chunk == 0 or n_pool <= 1:
+        return {pid: [] for pid in chunk_ids}
 
-    actual_k = min(k_neighbors, n_points - 1)
+    actual_k = min(k_neighbors, n_pool - 1)
     graph: Dict[Any, List[Any]] = {}
 
-    print(f"Building {actual_k}-neighbor graph for {n_points} items...", flush=True)
+    for start_idx in range(0, n_chunk, batch_size):
+        end_idx = min(start_idx + batch_size, n_chunk)
+        batch = chunk_embeddings[start_idx:end_idx]
 
-    for start_idx in range(0, n_points, batch_size):
-        end_idx = min(start_idx + batch_size, n_points)
-        batch = embeddings[start_idx:end_idx]
+        # Euclidean distances: shape (batch_len, n_pool)
+        dists = torch.cdist(batch, pool_embeddings, p=2)
 
-        # Euclidean distances: shape (batch_len, n_points)
-        dists = torch.cdist(batch, embeddings, p=2)
-
-        # We look for top (actual_k + 1) smallest distances (to account for self)
-        # Using -dists with topk finds the smallest distances
+        # Look for top (actual_k + 1) smallest distances (to account for self)
         neg_dists = -dists
-        _, top_indices = torch.topk(neg_dists, k=min(actual_k + 1, n_points), dim=1)
+        _, top_indices = torch.topk(neg_dists, k=min(actual_k + 1, n_pool), dim=1)
 
         for local_i, global_i in enumerate(range(start_idx, end_idx)):
-            pid = point_ids[global_i]
+            pid = chunk_ids[global_i]
             nbr_indices = top_indices[local_i].tolist()
             # Filter out self
-            neighbors = [point_ids[idx] for idx in nbr_indices if idx != global_i][:actual_k]
+            neighbors = [pool_ids[idx] for idx in nbr_indices if pool_ids[idx] != pid][:actual_k]
             graph[pid] = neighbors
 
     return graph
@@ -152,20 +165,23 @@ def main() -> int:
     if not client.collection_exists(source_name):
         raise RuntimeError(f"Source collection {source_name!r} does not exist.")
 
-    source_info = client.get_collection(source_name)
     total_source_points = client.count(source_name, exact=True).count
-    print(
-        f"Source collection: {source_name!r} ({total_source_points} points)",
-        flush=True,
-    )
+    print(f"Source collection: {source_name!r} ({total_source_points} points)", flush=True)
     if total_source_points == 0:
         raise RuntimeError("Source collection is empty; aborting.")
 
-    # Target collection initialization
+    # Target collection check & creation
     target_exists = client.collection_exists(target_name)
     if target_exists and not args.resume:
+        existing_count = client.count(target_name, exact=True).count
+        if existing_count >= total_source_points:
+            print(
+                f"Target collection {target_name!r} already contains all {existing_count} points. Migration complete.",
+                flush=True,
+            )
+            return 0
         print(
-            f"Target collection {target_name!r} already exists. Use --resume to continue or choose a new name.",
+            f"Target collection {target_name!r} already exists with {existing_count} points. Use --resume to continue.",
             flush=True,
         )
         return 0
@@ -183,6 +199,53 @@ def main() -> int:
             ),
         )
 
+    # Collect existing target IDs to skip them instantly
+    existing_ids: Set[Any] = set()
+    pool_ids: List[Any] = []
+    pool_embeddings: Optional[torch.Tensor] = None
+
+    if target_exists or args.resume:
+        print(f"Scanning existing points in {target_name!r}...", flush=True)
+        res_offset = None
+        seed_vectors: List[List[float]] = []
+
+        while True:
+            fetch_vectors = len(pool_ids) < 10000
+            t_points, next_res_offset = client.scroll(
+                collection_name=target_name,
+                limit=1000,
+                offset=res_offset,
+                with_payload=False,
+                with_vectors=fetch_vectors,
+            )
+            for tp in t_points:
+                existing_ids.add(tp.id)
+                if fetch_vectors and tp.vector is not None and len(tp.vector) == TARGET_DIMENSION:
+                    pool_ids.append(tp.id)
+                    seed_vectors.append(tp.vector)
+
+            if next_res_offset is None:
+                break
+            res_offset = next_res_offset
+
+        print(
+            f"Found {len(existing_ids)} points already migrated in {target_name!r}.",
+            flush=True,
+        )
+        if seed_vectors:
+            pool_embeddings = torch.tensor(seed_vectors, dtype=torch.float32)
+            print(
+                f"Seeded neighbor pool with {pool_embeddings.shape[0]} existing vectors for cross-batch connectivity.",
+                flush=True,
+            )
+
+        if len(existing_ids) >= total_source_points:
+            print(
+                f"All {total_source_points} points are already migrated to {target_name!r}. Nothing to do.",
+                flush=True,
+            )
+            return 0
+
     # Load Hypencoder model
     device = args.device or get_default_device()
     print(f"Loading Hypencoder ({args.model_name}) on device: {device}...", flush=True)
@@ -190,19 +253,106 @@ def main() -> int:
     passage_encoder = model.passage_encoder.to(device)
     passage_encoder.eval()
 
-    # Read points from source
-    print(f"Reading points from source {source_name!r}...", flush=True)
+    # Stream points from source
+    print(
+        f"Streaming source chunks (chunk_size={args.chunk_size}, batch_size={args.batch_size}, limit={args.limit})...",
+        flush=True,
+    )
     offset = None
-    all_points_data: List[Tuple[Any, Dict[str, Any], str]] = []
-    scanned = 0
+    migrated_this_run = 0
+    current_chunk: List[Tuple[Any, Dict[str, Any], str]] = []
 
-    max_to_fetch = args.limit if args.limit is not None else total_source_points
+    def flush_chunk(chunk: List[Tuple[Any, Dict[str, Any], str]]) -> int:
+        nonlocal pool_ids, pool_embeddings
+        if not chunk:
+            return 0
 
-    while scanned < max_to_fetch:
-        batch_limit = min(DEFAULT_SCROLL_PAGE, max_to_fetch - scanned)
+        chunk_ids = [item[0] for item in chunk]
+        chunk_payloads = [item[1] for item in chunk]
+        chunk_texts = [item[2] for item in chunk]
+
+        # 1. Encode passages
+        chunk_embeddings_list: List[torch.Tensor] = []
+        for b_start in range(0, len(chunk_texts), args.batch_size):
+            b_texts = chunk_texts[b_start : b_start + args.batch_size]
+            inputs = tokenizer(
+                b_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            ).to(device)
+
+            with torch.no_grad():
+                outputs = passage_encoder(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                )
+                chunk_embeddings_list.append(outputs.representation.cpu())
+
+        chunk_tensor = torch.cat(chunk_embeddings_list, dim=0)
+
+        # 2. Combine with neighbor pool for graph computation
+        if pool_embeddings is not None and pool_embeddings.shape[0] > 0:
+            combined_embeddings = torch.cat([pool_embeddings, chunk_tensor], dim=0)
+            combined_ids = pool_ids + chunk_ids
+        else:
+            combined_embeddings = chunk_tensor
+            combined_ids = chunk_ids
+
+        neighbor_graph = compute_neighbor_graph(
+            chunk_embeddings=chunk_tensor,
+            chunk_ids=chunk_ids,
+            pool_embeddings=combined_embeddings,
+            pool_ids=combined_ids,
+            k_neighbors=args.k_neighbors,
+            batch_size=256,
+        )
+
+        # 3. Upsert points and neighbor lists to Qdrant
+        upsert_batch_size = 64
+        for u_idx in range(0, len(chunk_ids), upsert_batch_size):
+            u_slice = slice(u_idx, u_idx + upsert_batch_size)
+            pts_to_upsert = []
+            for pid, pld, vec in zip(
+                chunk_ids[u_slice],
+                chunk_payloads[u_slice],
+                chunk_tensor[u_slice],
+            ):
+                merged_payload = dict(pld)
+                merged_payload["neighbors"] = neighbor_graph.get(pid, [])
+                pts_to_upsert.append(
+                    models.PointStruct(
+                        id=pid,
+                        vector=vec.tolist(),
+                        payload=merged_payload,
+                    )
+                )
+
+            client.upsert(
+                collection_name=target_name,
+                points=pts_to_upsert,
+                wait=True,
+            )
+
+        # 4. Update running state and bounded neighbor pool
+        existing_ids.update(chunk_ids)
+        pool_ids = combined_ids[-MAX_POOL_SIZE:]
+        pool_embeddings = combined_embeddings[-MAX_POOL_SIZE:]
+
+        total_target_now = client.count(target_name, exact=True).count
+        pct = (total_target_now / total_source_points) * 100
+        print(
+            f"Upserted chunk of {len(chunk_ids)} points. Total in {target_name!r}: {total_target_now}/{total_source_points} ({pct:.1f}%)",
+            flush=True,
+        )
+        return len(chunk_ids)
+
+    # Main scroll loop
+    while True:
         points, next_offset = client.scroll(
             collection_name=source_name,
-            limit=batch_limit,
+            limit=DEFAULT_SCROLL_PAGE,
             offset=offset,
             with_payload=True,
             with_vectors=False,
@@ -211,131 +361,43 @@ def main() -> int:
             break
 
         for p in points:
+            if p.id in existing_ids:
+                continue
+
             payload = p.payload or {}
             text = payload.get("text", "")
             if isinstance(text, str) and text.strip():
-                all_points_data.append((p.id, payload, text.strip()))
-                scanned += 1
-                if scanned >= max_to_fetch:
-                    break
+                current_chunk.append((p.id, payload, text.strip()))
 
-        if next_offset is None or scanned >= max_to_fetch:
+                if len(current_chunk) >= args.chunk_size:
+                    chunk_migrated = flush_chunk(current_chunk)
+                    migrated_this_run += chunk_migrated
+                    current_chunk = []
+
+                    if args.limit is not None and migrated_this_run >= args.limit:
+                        break
+
+        if args.limit is not None and migrated_this_run >= args.limit:
+            print(f"Reached requested limit of {args.limit} points for this run.", flush=True)
+            break
+
+        if next_offset is None:
             break
         offset = next_offset
 
-    print(f"Retrieved {len(all_points_data)} valid document chunks.", flush=True)
-    if not all_points_data:
-        print("No valid text chunks to embed.", flush=True)
-        return 0
+    # Flush remaining points in final chunk
+    if current_chunk and (args.limit is None or migrated_this_run < args.limit):
+        remaining_chunk = current_chunk
+        if args.limit is not None:
+            remaining_chunk = remaining_chunk[: args.limit - migrated_this_run]
+        chunk_migrated = flush_chunk(remaining_chunk)
+        migrated_this_run += chunk_migrated
 
-    # Check already migrated points if resume
-    existing_ids: Set[Any] = set()
-    if args.resume and client.collection_exists(target_name):
-        res_offset = None
-        while True:
-            t_points, next_res_offset = client.scroll(
-                collection_name=target_name,
-                limit=DEFAULT_SCROLL_PAGE,
-                offset=res_offset,
-                with_payload=True,
-                with_vectors=True,
-            )
-            for tp in t_points:
-                if (
-                    tp.vector is not None
-                    and len(tp.vector) == TARGET_DIMENSION
-                    and tp.payload
-                    and "neighbors" in tp.payload
-                ):
-                    existing_ids.add(tp.id)
-            if next_res_offset is None:
-                break
-            res_offset = next_res_offset
-        print(f"Resume: Found {len(existing_ids)} already migrated valid points.", flush=True)
-
-    # Encode all passage embeddings
-    print("Encoding passages with Hypencoder passage encoder...", flush=True)
-    all_embeddings_list: List[torch.Tensor] = []
-    all_ids: List[Any] = []
-    all_payloads: List[Dict[str, Any]] = []
-
-    for i in tqdm(range(0, len(all_points_data), args.batch_size), desc="Passage Encoding"):
-        batch = all_points_data[i : i + args.batch_size]
-        batch_ids = [item[0] for item in batch]
-        batch_payloads = [item[1] for item in batch]
-        batch_texts = [item[2] for item in batch]
-
-        inputs = tokenizer(
-            batch_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=512,
-        ).to(device)
-
-        with torch.no_grad():
-            outputs = passage_encoder(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-            )
-            reps = outputs.representation.cpu()
-
-        for pid, payload, rep in zip(batch_ids, batch_payloads, reps):
-            all_ids.append(pid)
-            all_payloads.append(payload)
-            all_embeddings_list.append(rep)
-
-    corpus_embeddings = torch.stack(all_embeddings_list)
+    final_count = client.count(target_name, exact=True).count
     print(
-        f"Generated {corpus_embeddings.shape[0]} embeddings of shape {corpus_embeddings.shape[1:]}.",
+        f"Migration run complete! Migrated {migrated_this_run} points this run. Target collection {target_name!r} now has {final_count}/{total_source_points} points.",
         flush=True,
     )
-
-    # Compute 100-neighbor graph for our corpus
-    neighbor_graph = compute_neighbor_graph(
-        corpus_embeddings,
-        all_ids,
-        k_neighbors=args.k_neighbors,
-        batch_size=args.batch_size * 4,
-    )
-
-    # Upsert into target collection
-    print(f"Upserting points and neighbor graph into {target_name!r}...", flush=True)
-    upsert_batch_size = 64
-    for i in tqdm(range(0, len(all_ids), upsert_batch_size), desc="Upserting to Qdrant"):
-        batch_slice = slice(i, i + upsert_batch_size)
-        sub_ids = all_ids[batch_slice]
-        sub_payloads = all_payloads[batch_slice]
-        sub_vectors = corpus_embeddings[batch_slice].numpy()
-
-        points_to_upsert = []
-        for pid, payload, vec in zip(sub_ids, sub_payloads, sub_vectors):
-            if pid in existing_ids:
-                continue
-
-            merged_payload = dict(payload)
-            merged_payload["neighbors"] = neighbor_graph.get(pid, [])
-            points_to_upsert.append(
-                models.PointStruct(
-                    id=pid,
-                    vector=vec.tolist(),
-                    payload=merged_payload,
-                )
-            )
-
-        if points_to_upsert:
-            client.upsert(
-                collection_name=target_name,
-                points=points_to_upsert,
-                wait=True,
-            )
-
-    dest_count = client.count(target_name, exact=True).count
-    print(
-        f"Migration complete! Target collection {target_name!r} now has {dest_count} points with 100-neighbor graphs.",
-        flush=True,
-    )
-    print("Source collection remains untouched.", flush=True)
     return 0
 
 

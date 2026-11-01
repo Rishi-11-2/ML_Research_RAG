@@ -219,6 +219,10 @@ EOF
 
 Replace the example IDs with judged relevant chunk IDs. After migration, run the same dataset with `--only eg2` (or omit `--only` to run both). The evaluator reports candidate Recall@50 and Precision@50, reranked Recall@5 and Precision@5, and mean/median/p95 latency split across embedding, Qdrant search, and reranking. It only reads the collections. For a meaningful comparison, label at least 50 representative questions and pool relevant IDs across both models' top results before scoring.
 
+### Hypencoder benchmark
+
+The **Benchmark Hypencoder vs Bi-Encoder** workflow assumes the Hypencoder collection is already migrated; it does not run migration. It generates at least 10,000 deterministic passage-derived probes from `document_chunks_hypencoder`, each labeled with its source chunk. These synthetic probes are useful for retrieval/load comparison, not human-authored QA accuracy.
+
 ---
 
 ## 🔄 Data Flow Summary
