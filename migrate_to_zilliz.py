@@ -15,7 +15,11 @@ from typing import Any, Dict, List, Optional, Set
 from dotenv import load_dotenv
 from pymilvus import MilvusClient
 from qdrant_client import QdrantClient
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
 
 DEFAULT_ZILLIZ_URI = "https://in03-e6db1074d3f3592.serverless.aws-eu-central-1.cloud.zilliz.com"
 DEFAULT_PAGE_SIZE = 256

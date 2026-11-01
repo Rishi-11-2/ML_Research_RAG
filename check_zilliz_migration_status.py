@@ -10,7 +10,21 @@ from dotenv import load_dotenv
 from pymilvus import MilvusClient
 from qdrant_client import QdrantClient
 
-from migrate_to_zilliz import DEFAULT_ZILLIZ_URI, get_zilliz_token
+DEFAULT_ZILLIZ_URI = "https://in03-e6db1074d3f3592.serverless.aws-eu-central-1.cloud.zilliz.com"
+
+
+def get_zilliz_token() -> str | None:
+    token = os.getenv("ZILLIZ_TOKEN")
+    if token and token.strip():
+        return token.strip()
+    token_path = os.path.join(os.path.dirname(__file__), "zilliz_token", "token.txt")
+    if os.path.exists(token_path):
+        try:
+            with open(token_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    return None
 
 
 def main() -> int:
