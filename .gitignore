@@ -9,3 +9,5 @@ interview.txt
 interview_answers.md
 zilliz_token/
 .DS_Store
+benchmark_results.json
+
