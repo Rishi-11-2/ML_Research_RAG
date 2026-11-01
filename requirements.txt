@@ -18,3 +18,4 @@ langchain-core>=0.3.0
 langgraph-checkpoint
 langchain-openai>=0.2.0
 groq
+pymilvus>=2.4.0

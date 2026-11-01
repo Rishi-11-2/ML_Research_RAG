@@ -1,0 +1,113 @@
+name: Migrate Vectors to Zilliz Cloud
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run every 6 hours
+    - cron: "25 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zilliz-cloud-migration
+  cancel-in-progress: false
+
+jobs:
+  migration_status:
+    runs-on: ubuntu-latest
+    outputs:
+      complete: ${{ steps.check.outputs.complete }}
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
+      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
+      ZILLIZ_COLLECTION: document_chunks
+    steps:
+      - name: Check out migration code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install clients
+        run: python -m pip install "qdrant-client>=1.15,<1.17" "pymilvus>=2.4.0" python-dotenv
+
+      - name: Check whether Zilliz migration is complete
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(python check_zilliz_migration_status.py)"
+          echo "complete=$status" >> "$GITHUB_OUTPUT"
+          echo "Zilliz migration complete: $status"
+
+  migrate:
+    needs: migration_status
+    if: needs.migration_status.outputs.complete != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
+      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
+      ZILLIZ_COLLECTION: document_chunks
+
+    steps:
+      - name: Check out migration code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install migration dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "qdrant-client>=1.15,<1.17" "pymilvus>=2.4.0" python-dotenv tqdm
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
+          [[ -n "$ZILLIZ_TOKEN" ]] || { echo "ZILLIZ_TOKEN secret is required" >&2; exit 1; }
+
+      - name: Run migration to Zilliz Cloud
+        run: python migrate_to_zilliz.py --resume
+
+  resume_after_timeout:
+    needs: migrate
+    if: ${{ always() && needs.migrate.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
+      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
+      ZILLIZ_COLLECTION: document_chunks
+    steps:
+      - name: Check out migration code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install migration dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "qdrant-client>=1.15,<1.17" "pymilvus>=2.4.0" python-dotenv tqdm
+
+      - name: Resume migration to Zilliz Cloud
+        run: python migrate_to_zilliz.py --resume
