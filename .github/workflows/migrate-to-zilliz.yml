@@ -2,9 +2,6 @@ name: Migrate Vectors to Zilliz Cloud
 
 on:
   workflow_dispatch:
-  schedule:
-    # Run every 6 hours
-    - cron: "25 */6 * * *"
 
 permissions:
   contents: read
