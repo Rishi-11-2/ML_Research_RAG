@@ -15,6 +15,21 @@ on:
         description: "Final reranked pool size (K)"
         required: true
         default: "5"
+      entry_points:
+        description: "Hypencoder graph starting points"
+        type: number
+        required: true
+        default: 12
+      expansion_candidates:
+        description: "Hypencoder graph nodes expanded per iteration"
+        type: number
+        required: true
+        default: 10
+      max_iter:
+        description: "Hypencoder graph traversal iterations"
+        type: number
+        required: true
+        default: 4
 
 permissions:
   contents: read
@@ -60,19 +75,34 @@ jobs:
         shell: bash
         env:
           QUERY_COUNT: ${{ inputs.query_count }}
+          ENTRY_POINTS: ${{ inputs.entry_points }}
+          EXPANSION_CANDIDATES: ${{ inputs.expansion_candidates }}
+          MAX_ITER: ${{ inputs.max_iter }}
         run: |
           set -euo pipefail
           [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
           [[ "$QUERY_COUNT" =~ ^[0-9]+$ ]] || { echo "query_count must be an integer" >&2; exit 1; }
           (( QUERY_COUNT >= 10000 )) || { echo "query_count must be at least 10000" >&2; exit 1; }
+          for value in "$ENTRY_POINTS" "$EXPANSION_CANDIDATES" "$MAX_ITER"; do
+            [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 )) || { echo "traversal settings must be positive integers" >&2; exit 1; }
+          done
 
       - name: Run end-to-end benchmark
         env:
           QUERY_COUNT: ${{ inputs.query_count }}
           CANDIDATE_K: ${{ inputs.candidate_k }}
           FINAL_K: ${{ inputs.final_k }}
+          ENTRY_POINTS: ${{ inputs.entry_points }}
+          EXPANSION_CANDIDATES: ${{ inputs.expansion_candidates }}
+          MAX_ITER: ${{ inputs.max_iter }}
         run: |
-          python benchmark_hypencoder_large.py --query-count "$QUERY_COUNT" --candidate-k "$CANDIDATE_K" --final-k "$FINAL_K"
+          python benchmark_hypencoder_large.py \
+            --query-count "$QUERY_COUNT" \
+            --candidate-k "$CANDIDATE_K" \
+            --final-k "$FINAL_K" \
+            --entry-points "$ENTRY_POINTS" \
+            --expansion-candidates "$EXPANSION_CANDIDATES" \
+            --max-iter "$MAX_ITER"
 
       - name: Upload benchmark artifacts
         if: always()

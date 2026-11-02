@@ -115,7 +115,7 @@ def evaluate_biencoder(client, collection, minilm, reranker, queries, candidate_
     cand_p_list, cand_r_list = [], []
     final_p_list, final_r_list, mrr_list = [], [], []
 
-    for item in queries:
+    for query_index, item in enumerate(queries, start=1):
         query = item["query"]
         relevant = set(item["relevant_ids"])
 
@@ -155,6 +155,13 @@ def evaluate_biencoder(client, collection, minilm, reranker, queries, candidate_
         final_r_list.append(final_r)
         mrr_list.append(rr)
 
+        if query_index % 100 == 0 or query_index == len(queries):
+            print(
+                f"Bi-encoder queries: {query_index}/{len(queries)}; "
+                f"mean end-to-end {statistics.mean(total_ms):.1f} ms/query",
+                flush=True,
+            )
+
     return {
         "candidate_recall": statistics.mean(cand_r_list),
         "candidate_precision": statistics.mean(cand_p_list),
@@ -170,12 +177,21 @@ def evaluate_biencoder(client, collection, minilm, reranker, queries, candidate_
     }
 
 
-def evaluate_hypencoder(retriever, reranker, queries, candidate_k, final_k):
+def evaluate_hypencoder(
+    retriever,
+    reranker,
+    queries,
+    candidate_k,
+    final_k,
+    entry_points=12,
+    expansion_candidates=10,
+    max_iter=4,
+):
     traversal_ms, rerank_ms, total_ms = [], [], []
     cand_p_list, cand_r_list = [], []
     final_p_list, final_r_list, mrr_list = [], [], []
 
-    for item in queries:
+    for query_index, item in enumerate(queries, start=1):
         query = item["query"]
         relevant = set(item["relevant_ids"])
 
@@ -183,9 +199,9 @@ def evaluate_hypencoder(retriever, reranker, queries, candidate_k, final_k):
         candidates = retriever.retrieve(
             query=query,
             k=candidate_k,
-            num_entry_points=min(50, len(retriever._all_known_ids)),
-            ncandidates=25,
-            max_iter=16,
+            num_entry_points=min(entry_points, len(retriever._all_known_ids)),
+            ncandidates=expansion_candidates,
+            max_iter=max_iter,
         )
         t1 = time.perf_counter()
 
@@ -209,6 +225,13 @@ def evaluate_hypencoder(retriever, reranker, queries, candidate_k, final_k):
         final_p_list.append(final_p)
         final_r_list.append(final_r)
         mrr_list.append(rr)
+
+        if query_index % 100 == 0 or query_index == len(queries):
+            print(
+                f"Hypencoder queries: {query_index}/{len(queries)}; "
+                f"mean traversal {statistics.mean(traversal_ms):.1f} ms/query",
+                flush=True,
+            )
 
     return {
         "candidate_recall": statistics.mean(cand_r_list),
@@ -235,10 +258,22 @@ def main():
         default=MINIMUM_QUERY_COUNT,
         help=f"Number of unique corpus-derived query probes (minimum {MINIMUM_QUERY_COUNT})",
     )
+    parser.add_argument("--entry-points", type=int, default=12, help="Hypencoder graph starting points (default: 12)")
+    parser.add_argument(
+        "--expansion-candidates",
+        type=int,
+        default=10,
+        help="Hypencoder graph nodes expanded per iteration (default: 10)",
+    )
+    parser.add_argument("--max-iter", type=int, default=4, help="Hypencoder graph traversal iterations (default: 4)")
     parser.add_argument("--output-json", default="benchmark_results.json", help="Path to save results JSON")
     args = parser.parse_args()
     if args.query_count < MINIMUM_QUERY_COUNT:
         parser.error(f"--query-count must be at least {MINIMUM_QUERY_COUNT}")
+    if args.candidate_k < 1 or args.final_k < 1:
+        parser.error("--candidate-k and --final-k must be positive")
+    if args.entry_points < 1 or args.expansion_candidates < 1 or args.max_iter < 1:
+        parser.error("--entry-points, --expansion-candidates, and --max-iter must be positive")
 
     url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY")
@@ -287,6 +322,12 @@ def main():
     )
 
     print("\n--- Evaluating Hypencoder (q-net + Graph Traversal) ---")
+    print(
+        "Traversal budget: "
+        f"{args.entry_points} entry points, {args.expansion_candidates} expansion candidates, "
+        f"{args.max_iter} iterations",
+        flush=True,
+    )
     model, tokenizer = load_hypencoder()
     random.seed(0)
     np.random.seed(0)
@@ -304,6 +345,9 @@ def main():
         queries=queries,
         candidate_k=args.candidate_k,
         final_k=args.final_k,
+        entry_points=args.entry_points,
+        expansion_candidates=args.expansion_candidates,
+        max_iter=args.max_iter,
     )
 
     summary_md = f"""# 🚀 End-to-End Retrieval Benchmark Results
@@ -314,6 +358,7 @@ def main():
 - **Query set SHA-256:** `{query_set_sha256}`
 - **Candidate Pool ($K$):** `{args.candidate_k}`
 - **Final Reranked Context ($K$):** `{args.final_k}`
+- **Hypencoder traversal budget:** `{args.entry_points}` entry points, `{args.expansion_candidates}` expansion candidates, `{args.max_iter}` iterations
 
 ### 📊 Metric Comparison
 
@@ -342,6 +387,11 @@ def main():
         "query_type": "corpus-derived extractive probes; one positive source chunk per query",
         "query_set_sha256": query_set_sha256,
         "hypencoder_random_seed": 0,
+        "hypencoder_traversal": {
+            "entry_points": args.entry_points,
+            "expansion_candidates": args.expansion_candidates,
+            "max_iter": args.max_iter,
+        },
         "candidate_k": args.candidate_k,
         "final_k": args.final_k,
         "source_corpus_count": src_count,

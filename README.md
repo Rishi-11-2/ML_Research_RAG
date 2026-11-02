@@ -168,6 +168,8 @@ Replace the example IDs with judged relevant chunk IDs. After migration, run the
 
 The **Benchmark Hypencoder vs Bi-Encoder** workflow assumes the Hypencoder collection is already migrated; it does not run migration. It generates at least 10,000 deterministic passage-derived probes from `document_chunks_hypencoder`, each labeled with its source chunk. These synthetic probes are useful for retrieval/load comparison, not human-authored QA accuracy.
 
+The hosted-runner defaults limit Hypencoder graph traversal to 12 entry points, 10 expansion candidates, and 4 iterations; the workflow lets you adjust these values to trade runtime against retrieval quality. Both evaluation phases print progress every 100 queries. The report records the traversal settings alongside precision, recall, MRR, and mean latency, so results from different traversal budgets can be compared accurately.
+
 ---
 
 ## 🔄 Data Flow Summary
