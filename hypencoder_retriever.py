@@ -12,6 +12,7 @@ to quickly discover the highest-scoring document chunks.
 """
 
 import heapq
+import json
 import os
 import random
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -60,16 +61,18 @@ def load_hypencoder(
         import streamlit as st
 
         @st.cache_resource(show_spinner=False)
-        def _cached_loader(name: str):
+        def _cached_loader(name: str, target_device: str):
             m = HypencoderDualEncoder.from_pretrained(name)
             t = AutoTokenizer.from_pretrained(name)
+            m.to(target_device)
             m.eval()
             return m, t
 
-        model, tokenizer = _cached_loader(model_name)
+        model, tokenizer = _cached_loader(model_name, device)
     except Exception:
         model = HypencoderDualEncoder.from_pretrained(model_name)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model.to(device)
         model.eval()
 
     _MODEL_CACHE[cache_key] = (model, tokenizer)
@@ -82,7 +85,7 @@ def score_candidates_with_qnet(
     query: str,
     candidate_embeddings: torch.Tensor,
     device: Optional[str] = None,
-    query_max_length: int = 64,
+    query_max_length: int = 32,
 ) -> torch.Tensor:
     """Score candidate embeddings using query-generated q-net.
 
@@ -146,6 +149,8 @@ class HypencoderGraphRetriever:
         else:
             self.model = model
             self.tokenizer = tokenizer
+            self.model.to(self.device)
+            self.model.eval()
 
         # In-memory working cache for fast graph traversal
         self._vector_cache: Dict[Any, torch.Tensor] = {}
@@ -238,7 +243,7 @@ class HypencoderGraphRetriever:
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=64,
+            max_length=32,
         ).to(self.device)
 
         with torch.no_grad():
@@ -284,8 +289,14 @@ class HypencoderGraphRetriever:
             scored = list(zip(valid_candidates, sim_scores))
             scored.sort(key=lambda x: x[1], reverse=True)
 
+            # Algorithm 1 first retains only the best nCandidates in the current
+            # frontier, then compares that frontier with the current top-k floor.
+            best_candidates = scored[:ncandidates]
+            if len(heap) >= k and best_candidates and best_candidates[0][1] < heap[0][0]:
+                break
+
             added_to_heap = False
-            for cid, score in scored:
+            for cid, score in best_candidates:
                 payload = self._payload_cache.get(cid, {})
                 if len(heap) < k:
                     tie_breaker += 1
@@ -297,13 +308,9 @@ class HypencoderGraphRetriever:
                         heapq.heapreplace(heap, (score, tie_breaker, cid, payload))
                         added_to_heap = True
 
-            # Early stopping condition: if no candidates entered heap after iter 0
-            if not added_to_heap and iter_idx > 0:
-                break
-
             # Expand neighbors for top ncandidates
             next_candidates: List[Any] = []
-            for cid, _ in scored[:ncandidates]:
+            for cid, _ in best_candidates:
                 payload = self._payload_cache.get(cid, {})
                 neighbors = payload.get("neighbors") or []
                 for n_id in neighbors:
@@ -311,6 +318,8 @@ class HypencoderGraphRetriever:
                         explored.add(n_id)
                         next_candidates.append(n_id)
 
+            if not added_to_heap:
+                break
             candidates = next_candidates
 
         # 4. Format and sort final results
@@ -338,3 +347,50 @@ class HypencoderGraphRetriever:
         # Sort descending by score
         results.reverse()
         return results
+
+
+class HypencoderZillizGraphRetriever(HypencoderGraphRetriever):
+    """Use the same q-net graph traversal with vectors and edges stored in Zilliz."""
+
+    ENTRY_POINT_FIELD = "hypencoder_entry_point"
+
+    def _preload_cache(self, max_points: int = 5000) -> None:
+        # The build job marks a deterministic, corpus-wide seed set so search does
+        # not have to sample only from the first page of the collection.
+        self.client.load_collection(collection_name=self.collection_name)
+        rows = self.client.query(
+            collection_name=self.collection_name,
+            filter=f"{self.ENTRY_POINT_FIELD} == true",
+            output_fields=["id"],
+            limit=min(max_points, 10_000),
+        )
+        self._all_known_ids = [row["id"] for row in rows if row.get("id") is not None]
+        if not self._all_known_ids:
+            raise RuntimeError(
+                f"No Zilliz graph entry points found in {self.collection_name!r}; "
+                "run the Hypencoder Zilliz graph build workflow first."
+            )
+
+    def _fetch_points(self, point_ids: List[Any]) -> None:
+        missing = [point_id for point_id in point_ids if point_id not in self._vector_cache]
+        if not missing:
+            return
+        ids = [str(point_id) for point_id in missing]
+        rows = self.client.query(
+            collection_name=self.collection_name,
+            filter=f"id in {json.dumps(ids)}",
+            output_fields=["id", "vector", "text", "source", "_stable_id", "neighbors"],
+            limit=len(ids),
+            consistency_level="Strong",
+        )
+        for row in rows:
+            point_id = row.get("id")
+            vector = row.get("vector")
+            if point_id is None or vector is None:
+                continue
+            self._vector_cache[point_id] = torch.tensor(vector, dtype=torch.float32)
+            self._payload_cache[point_id] = {
+                key: value for key, value in row.items() if key not in ("id", "vector")
+            }
+            if point_id not in self._all_known_ids:
+                self._all_known_ids.append(point_id)

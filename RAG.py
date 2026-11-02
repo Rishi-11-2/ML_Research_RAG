@@ -16,20 +16,52 @@ QDRANT_URL = os.environ.get("QDRANT_URL")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "document_chunks")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+RETRIEVER_BACKEND = os.getenv("RETRIEVER_BACKEND", "qdrant").strip().lower()
 EG2_COLLECTION = os.getenv("QDRANT_COLLECTION_EG2", f"{QDRANT_COLLECTION}_embeddinggemma2")
 ACTIVE_COLLECTION = EG2_COLLECTION if EMBEDDING_MODEL == "google/embeddinggemma-2" else QDRANT_COLLECTION
 
-if not QDRANT_URL:
-    raise RuntimeError("QDRANT_URL must be set before starting the RAG application")
-client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY.strip() if QDRANT_API_KEY else None, prefer_grpc=False)
+client = None
+embedder = None
+hypencoder_retriever = None
 
-#--------------------------
-# -----------------------
-embedder = SentenceTransformer(
-    EMBEDDING_MODEL,
-    **({"config_kwargs": {"vision_config": None, "audio_config": None}, "truncate_dim": 256}
-       if EMBEDDING_MODEL == "google/embeddinggemma-2" else {}),
-)
+if RETRIEVER_BACKEND == "qdrant":
+    if not QDRANT_URL:
+        raise RuntimeError("QDRANT_URL must be set before starting the RAG application")
+    client = QdrantClient(
+        url=QDRANT_URL,
+        api_key=QDRANT_API_KEY.strip() if QDRANT_API_KEY else None,
+        prefer_grpc=False,
+    )
+    embedder = SentenceTransformer(
+        EMBEDDING_MODEL,
+        **({"config_kwargs": {"vision_config": None, "audio_config": None}, "truncate_dim": 256}
+           if EMBEDDING_MODEL == "google/embeddinggemma-2" else {}),
+    )
+elif RETRIEVER_BACKEND == "hypencoder_zilliz":
+    from pymilvus import MilvusClient
+    from hypencoder_retriever import HypencoderZillizGraphRetriever, load_hypencoder
+
+    zilliz_uri = os.getenv("ZILLIZ_URI")
+    zilliz_token = os.getenv("ZILLIZ_TOKEN")
+    if not zilliz_uri or not zilliz_token:
+        raise RuntimeError("ZILLIZ_URI and ZILLIZ_TOKEN are required for the hypencoder_zilliz backend")
+    zilliz_collection = os.getenv(
+        "ZILLIZ_COLLECTION_HYPENCODER", "document_chunks_hypencoder_zilliz_v2"
+    )
+    milvus_client = MilvusClient(uri=zilliz_uri, token=zilliz_token)
+    hyp_model, hyp_tokenizer = load_hypencoder()
+    hypencoder_retriever = HypencoderZillizGraphRetriever(
+        client=milvus_client,
+        collection_name=zilliz_collection,
+        model=hyp_model,
+        tokenizer=hyp_tokenizer,
+        preload_limit=10_000,
+    )
+else:
+    raise RuntimeError(
+        "RETRIEVER_BACKEND must be 'qdrant' or 'hypencoder_zilliz'"
+    )
+
 cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
@@ -45,6 +77,8 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
 
 @lru_cache(maxsize=512)
 def _cached_query_embedding(query: str) -> np.ndarray:
+    if embedder is None:
+        raise RuntimeError("Query embeddings are unavailable for the selected retrieval backend")
     if EMBEDDING_MODEL == "google/embeddinggemma-2":
         return embedder.encode(query, prompt_name="SearchQuery", normalize_embeddings=True)
     return embedder.encode(query, normalize_embeddings=True)
@@ -52,6 +86,8 @@ def _cached_query_embedding(query: str) -> np.ndarray:
 
 def embed_document(text: str, title: str = "none") -> np.ndarray:
     """Embed a document using the same model and task prompt as query-time retrieval."""
+    if embedder is None:
+        raise RuntimeError("Document embeddings are unavailable for the selected retrieval backend")
     if EMBEDDING_MODEL == "google/embeddinggemma-2":
         return embedder.encode(
             f"title: {title or 'none'} | text: {text}",
@@ -102,6 +138,9 @@ def call_vector_db(query: str, k: int) -> List[dict]:
     uses the dense and sparse vectors, with their results combined
     using the Reciprocal Rank Fusion.
     """
+    if hypencoder_retriever is not None:
+        return hypencoder_retriever.retrieve(query=query, k=k)
+
     query_vec = _cached_query_embedding(query)
     # client = QdrantClient(url=QDRANT_URL, api_key=(QDRANT_API_KEY.strip() ), prefer_grpc=False)
     # Search Qdrant

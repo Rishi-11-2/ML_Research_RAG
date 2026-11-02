@@ -166,9 +166,13 @@ Replace the example IDs with judged relevant chunk IDs. After migration, run the
 
 ### Hypencoder benchmark
 
-The **Benchmark Hypencoder vs Bi-Encoder** workflow assumes the Hypencoder collection is already migrated; it does not run migration. It generates at least 10,000 deterministic passage-derived probes from `document_chunks_hypencoder`, each labeled with its source chunk. These synthetic probes are useful for retrieval/load comparison, not human-authored QA accuracy.
+The **Benchmark Hypencoder vs Bi-Encoder** workflow assumes the Hypencoder collection is already built in Zilliz; it does not run migration or graph construction. It generates at least 10,000 deterministic passage-derived probes from the original Qdrant document collection, each labeled with its source chunk. These synthetic probes are useful for retrieval/load comparison, not human-authored QA accuracy.
 
 The hosted-runner defaults limit Hypencoder graph traversal to 12 entry points, 10 expansion candidates, and 4 iterations; the workflow lets you adjust these values to trade runtime against retrieval quality. Both evaluation phases print progress every 100 queries. The report records the traversal settings alongside precision, recall, MRR, and mean latency, so results from different traversal budgets can be compared accurately.
+
+The **Migrate Qdrant to Hypencoder** workflow is the legacy path: it encodes document text from `document_chunks`, then writes Hypencoder vectors and approximate neighbor lists to `document_chunks_hypencoder` in Qdrant. It has a status check and one automatic continuation job after a failed run. It does not write to Zilliz. The separate, manually dispatched **Build Fresh Hypencoder Collection in Zilliz** workflow reads the original `document_chunks` payloads, computes new passage vectors, builds L2 neighbor lists through Zilliz search, and validates every source ID and graph link before its cleanup job deletes the legacy Qdrant Hypencoder collection. It never reads or migrates the old Hypencoder vectors and preserves `document_chunks`. The build can resume from completed vector and graph batches after runner timeouts; if both automatic attempts time out, manually dispatch it again with the same target collection. Set repository secrets `QDRANT_URL`, `ZILLIZ_URI`, and `ZILLIZ_TOKEN`; `QDRANT_API_KEY` is only needed when the Qdrant endpoint requires it.
+
+The RAG app can use the Zilliz Hypencoder path by setting `RETRIEVER_BACKEND=hypencoder_zilliz`, `ZILLIZ_URI`, `ZILLIZ_TOKEN`, and `ZILLIZ_COLLECTION_HYPENCODER`. The default `qdrant` backend remains unchanged. The Hypencoder benchmark reads its source probes from Qdrant and evaluates the Hypencoder graph in Zilliz.
 
 ---
 

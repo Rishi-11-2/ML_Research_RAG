@@ -1,0 +1,210 @@
+name: Build Fresh Hypencoder Collection in Zilliz
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_collection:
+        description: "New Zilliz staging collection; must not already exist"
+        required: true
+        default: "document_chunks_hypencoder_zilliz_v2"
+        type: string
+      graph_degree:
+        description: "Approximate L2 neighbors stored per point"
+        required: true
+        default: 100
+        type: number
+      embedding_batch_size:
+        description: "Hypencoder passage encoding batch size"
+        required: true
+        default: 16
+        type: number
+      search_batch_size:
+        description: "Zilliz graph search batch size"
+        required: true
+        default: 64
+        type: number
+      delete_legacy_qdrant_hypencoder:
+        description: "Delete document_chunks_hypencoder from Qdrant only after Zilliz validation succeeds"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hypencoder-zilliz-fresh-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_HYPENCODER: document_chunks_hypencoder
+      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
+      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
+      ZILLIZ_COLLECTION_HYPENCODER: ${{ inputs.target_collection }}
+      HYPENCODER_BUILD_ID: ${{ inputs.target_collection }}
+      HF_HOME: ${{ github.workspace }}/.hf_cache
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore Hugging Face cache
+        uses: actions/cache@v4
+        with:
+          path: .hf_cache
+          key: hypencoder-model-ubuntu-x64-v2
+          restore-keys: |
+            hypencoder-model-ubuntu-x64-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "torch>=2.0" "transformers>=4.48" "qdrant-client>=1.15,<1.17" "pymilvus>=2.4,<3" python-dotenv tqdm numpy
+
+      - name: Validate settings and complete Qdrant source
+        shell: bash
+        env:
+          TARGET_COLLECTION: ${{ inputs.target_collection }}
+          GRAPH_DEGREE: ${{ inputs.graph_degree }}
+          EMBEDDING_BATCH_SIZE: ${{ inputs.embedding_batch_size }}
+          SEARCH_BATCH_SIZE: ${{ inputs.search_batch_size }}
+        run: |
+          set -euo pipefail
+          [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
+          [[ -n "$ZILLIZ_URI" ]] || { echo "ZILLIZ_URI secret is required" >&2; exit 1; }
+          [[ -n "$ZILLIZ_TOKEN" ]] || { echo "ZILLIZ_TOKEN secret is required" >&2; exit 1; }
+          [[ "$TARGET_COLLECTION" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]] || { echo "Invalid Zilliz collection name" >&2; exit 1; }
+          if ! [[ "$GRAPH_DEGREE" =~ ^[0-9]+$ ]] || (( GRAPH_DEGREE <= 0 )); then
+            echo "graph_degree must be positive" >&2
+            exit 1
+          fi
+          if ! [[ "$EMBEDDING_BATCH_SIZE" =~ ^[0-9]+$ ]] || (( EMBEDDING_BATCH_SIZE <= 0 )); then
+            echo "embedding_batch_size must be positive" >&2
+            exit 1
+          fi
+          if ! [[ "$SEARCH_BATCH_SIZE" =~ ^[0-9]+$ ]] || (( SEARCH_BATCH_SIZE <= 0 )); then
+            echo "search_batch_size must be positive" >&2
+            exit 1
+          fi
+          echo "The build reads document text from QDRANT_COLLECTION and creates fresh Hypencoder vectors; it does not read the legacy Hypencoder vectors."
+
+      - name: Build fresh Hypencoder vectors and graph in Zilliz
+        env:
+          GRAPH_DEGREE: ${{ inputs.graph_degree }}
+          EMBEDDING_BATCH_SIZE: ${{ inputs.embedding_batch_size }}
+          SEARCH_BATCH_SIZE: ${{ inputs.search_batch_size }}
+        run: |
+          python build_hypencoder_zilliz.py \
+            --target-collection "$ZILLIZ_COLLECTION_HYPENCODER" \
+            --build-id "$HYPENCODER_BUILD_ID" \
+            --graph-degree "$GRAPH_DEGREE" \
+            --embedding-batch-size "$EMBEDDING_BATCH_SIZE" \
+            --search-batch-size "$SEARCH_BATCH_SIZE"
+
+      - name: Upload build report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypencoder-zilliz-build-${{ github.run_id }}-initial
+          path: hypencoder_zilliz_build_report.json
+          if-no-files-found: ignore
+
+  resume_after_timeout:
+    needs: build
+    if: ${{ needs.build.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_HYPENCODER: document_chunks_hypencoder
+      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
+      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
+      ZILLIZ_COLLECTION_HYPENCODER: ${{ inputs.target_collection }}
+      HYPENCODER_BUILD_ID: ${{ inputs.target_collection }}
+      HF_HOME: ${{ github.workspace }}/.hf_cache
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore Hugging Face cache
+        uses: actions/cache@v4
+        with:
+          path: .hf_cache
+          key: hypencoder-model-ubuntu-x64-v2
+          restore-keys: |
+            hypencoder-model-ubuntu-x64-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "torch>=2.0" "transformers>=4.48" "qdrant-client>=1.15,<1.17" "pymilvus>=2.4,<3" python-dotenv tqdm numpy
+
+      - name: Resume fresh Hypencoder build
+        env:
+          GRAPH_DEGREE: ${{ inputs.graph_degree }}
+          EMBEDDING_BATCH_SIZE: ${{ inputs.embedding_batch_size }}
+          SEARCH_BATCH_SIZE: ${{ inputs.search_batch_size }}
+        run: |
+          python build_hypencoder_zilliz.py \
+            --target-collection "$ZILLIZ_COLLECTION_HYPENCODER" \
+            --build-id "$HYPENCODER_BUILD_ID" \
+            --graph-degree "$GRAPH_DEGREE" \
+            --embedding-batch-size "$EMBEDDING_BATCH_SIZE" \
+            --search-batch-size "$SEARCH_BATCH_SIZE" \
+            --resume
+
+      - name: Upload resumed build report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypencoder-zilliz-build-${{ github.run_id }}-resume
+          path: hypencoder_zilliz_build_report.json
+          if-no-files-found: ignore
+
+  delete_legacy_qdrant_collection:
+    needs: [build, resume_after_timeout]
+    if: ${{ always() && inputs.delete_legacy_qdrant_hypencoder && (needs.build.result == 'success' || needs.resume_after_timeout.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_HYPENCODER: document_chunks_hypencoder
+      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
+      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
+      ZILLIZ_COLLECTION_HYPENCODER: ${{ inputs.target_collection }}
+      HYPENCODER_BUILD_ID: ${{ inputs.target_collection }}
+      GRAPH_DEGREE: ${{ inputs.graph_degree }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install database clients
+        run: python -m pip install "qdrant-client>=1.15,<1.17" "pymilvus>=2.4,<3" python-dotenv
+
+      - name: Delete old Qdrant Hypencoder collection after validation
+        run: python delete_old_hypencoder_qdrant.py

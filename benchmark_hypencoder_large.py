@@ -18,11 +18,12 @@ from typing import Any, Dict, List, Set, Tuple
 
 from dotenv import load_dotenv
 import numpy as np
+from pymilvus import MilvusClient
 from qdrant_client import QdrantClient
 from sentence_transformers import CrossEncoder, SentenceTransformer
 import torch
 
-from hypencoder_retriever import HypencoderGraphRetriever, load_hypencoder
+from hypencoder_retriever import HypencoderZillizGraphRetriever, load_hypencoder
 
 MINIMUM_QUERY_COUNT = 10_000
 QUERY_SCROLL_PAGE_SIZE = 1000
@@ -279,25 +280,40 @@ def main():
     api_key = os.getenv("QDRANT_API_KEY")
     if not url:
         raise RuntimeError("QDRANT_URL must be configured")
+    zilliz_uri = os.getenv("ZILLIZ_URI")
+    zilliz_token = os.getenv("ZILLIZ_TOKEN")
+    if not zilliz_uri or not zilliz_token:
+        raise RuntimeError("ZILLIZ_URI and ZILLIZ_TOKEN must be configured")
 
     src_coll = os.getenv("QDRANT_COLLECTION", "document_chunks")
-    hyp_coll = os.getenv("QDRANT_COLLECTION_HYPENCODER", "document_chunks_hypencoder")
+    hyp_coll = os.getenv("ZILLIZ_COLLECTION_HYPENCODER", "document_chunks_hypencoder_zilliz_v2")
 
     client = QdrantClient(url=url, api_key=api_key.strip() if api_key else None, timeout=60.0, prefer_grpc=False)
-
-    hyp_count = client.count(hyp_coll, exact=True).count if client.collection_exists(hyp_coll) else 0
     src_count = client.count(src_coll, exact=True).count if client.collection_exists(src_coll) else 0
+    milvus = MilvusClient(uri=zilliz_uri, token=zilliz_token)
+    if not milvus.has_collection(hyp_coll):
+        milvus.close()
+        raise RuntimeError(f"Zilliz Hypencoder collection {hyp_coll!r} does not exist")
+    hyp_stats = milvus.get_collection_stats(collection_name=hyp_coll)
+    try:
+        hyp_count = int(hyp_stats["row_count"])
+    except (KeyError, TypeError, ValueError) as exc:
+        milvus.close()
+        raise RuntimeError(f"Could not read Zilliz row count for {hyp_coll!r}: {hyp_stats}") from exc
 
     print(f"Total source corpus size: {src_count} chunks")
-    print(f"Hypencoder collection size: {hyp_count} chunks")
-    if hyp_count < args.query_count:
+    print(f"Zilliz Hypencoder collection size: {hyp_count} chunks")
+    if hyp_count != src_count:
+        milvus.close()
         raise RuntimeError(
-            f"Need at least {args.query_count} migrated Hypencoder chunks to build that many labeled queries; "
-            f"the collection has {hyp_count}. Increase --limit in migrate_hypencoder.py."
+            f"This benchmark requires matching corpora; Qdrant has {src_count} points and Zilliz has {hyp_count}."
         )
+    if hyp_count < args.query_count:
+        milvus.close()
+        raise RuntimeError(f"Need at least {args.query_count} Zilliz Hypencoder points; found {hyp_count}.")
 
     print(f"\nBuilding {args.query_count:,} deterministic query probes from Hypencoder passages...")
-    queries = build_benchmark_queries(client, hyp_coll, args.query_count)
+    queries = build_benchmark_queries(client, src_coll, args.query_count)
     query_set_sha256 = hashlib.sha256(
         "\n".join(
             json.dumps(query, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -332,8 +348,8 @@ def main():
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)
-    retriever = HypencoderGraphRetriever(
-        client=client,
+    retriever = HypencoderZillizGraphRetriever(
+        client=milvus,
         collection_name=hyp_coll,
         model=model,
         tokenizer=tokenizer,
@@ -411,6 +427,8 @@ def main():
                 f.write(summary_md + "\n")
         except Exception as e:
             print(f"[WARN] Could not write to GITHUB_STEP_SUMMARY: {e}")
+
+    milvus.close()
 
 
 if __name__ == "__main__":

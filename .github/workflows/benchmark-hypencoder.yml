@@ -15,6 +15,11 @@ on:
         description: "Final reranked pool size (K)"
         required: true
         default: "5"
+      hypencoder_collection:
+        description: "Zilliz collection built by the fresh Hypencoder Zilliz workflow"
+        required: true
+        default: "document_chunks_hypencoder_zilliz_v2"
+        type: string
       entry_points:
         description: "Hypencoder graph starting points"
         type: number
@@ -46,7 +51,9 @@ jobs:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
       QDRANT_COLLECTION: document_chunks
-      QDRANT_COLLECTION_HYPENCODER: document_chunks_hypencoder
+      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
+      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
+      ZILLIZ_COLLECTION_HYPENCODER: ${{ inputs.hypencoder_collection }}
       HF_HOME: ${{ github.workspace }}/.hf_cache
 
     steps:
@@ -69,7 +76,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "torch>=2.0" "transformers>=4.48" "sentence-transformers>=6.1.0" "qdrant-client>=1.15,<1.17" python-dotenv tqdm numpy
+          python -m pip install "torch>=2.0" "transformers>=4.48" "sentence-transformers>=6.1.0" "qdrant-client>=1.15,<1.17" "pymilvus>=2.4,<3" python-dotenv tqdm numpy
 
       - name: Validate Qdrant secret and query count
         shell: bash
@@ -81,10 +88,15 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
+          [[ -n "$ZILLIZ_URI" ]] || { echo "ZILLIZ_URI secret is required" >&2; exit 1; }
+          [[ -n "$ZILLIZ_TOKEN" ]] || { echo "ZILLIZ_TOKEN secret is required" >&2; exit 1; }
           [[ "$QUERY_COUNT" =~ ^[0-9]+$ ]] || { echo "query_count must be an integer" >&2; exit 1; }
           (( QUERY_COUNT >= 10000 )) || { echo "query_count must be at least 10000" >&2; exit 1; }
           for value in "$ENTRY_POINTS" "$EXPANSION_CANDIDATES" "$MAX_ITER"; do
-            [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 )) || { echo "traversal settings must be positive integers" >&2; exit 1; }
+            if ! [[ "$value" =~ ^[0-9]+$ ]] || (( value <= 0 )); then
+              echo "traversal settings must be positive integers" >&2
+              exit 1
+            fi
           done
 
       - name: Run end-to-end benchmark
