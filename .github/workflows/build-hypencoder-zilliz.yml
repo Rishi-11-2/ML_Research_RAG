@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       target_collection:
-        description: "New Zilliz staging collection; must not already exist"
+        description: "Zilliz staging collection; a matching partial build will resume"
         required: true
         default: "document_chunks_hypencoder_zilliz_v2"
         type: string
@@ -110,7 +110,8 @@ jobs:
             --build-id "$HYPENCODER_BUILD_ID" \
             --graph-degree "$GRAPH_DEGREE" \
             --embedding-batch-size "$EMBEDDING_BATCH_SIZE" \
-            --search-batch-size "$SEARCH_BATCH_SIZE"
+            --search-batch-size "$SEARCH_BATCH_SIZE" \
+            --resume
 
       - name: Upload build report
         if: always()
@@ -122,7 +123,7 @@ jobs:
 
   resume_after_timeout:
     needs: build
-    if: ${{ needs.build.result == 'failure' }}
+    if: ${{ always() && (needs.build.result == 'failure' || needs.build.result == 'cancelled') }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:

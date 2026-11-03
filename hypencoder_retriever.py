@@ -223,6 +223,7 @@ class HypencoderGraphRetriever:
         num_entry_points: int = 50,
         ncandidates: int = 25,
         max_iter: int = 16,
+        random_seed: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Perform graph-based retrieval using Hypencoder q-net scoring.
 
@@ -232,6 +233,7 @@ class HypencoderGraphRetriever:
             num_entry_points: Number of initial starting nodes.
             ncandidates: Number of top candidates to expand neighbors from at each step.
             max_iter: Maximum graph traversal expansion iterations.
+            random_seed: Optional seed for reproducible entry-point sampling.
 
         Returns:
             List of result dicts matching the call_vector_db interface:
@@ -261,7 +263,8 @@ class HypencoderGraphRetriever:
             return []
 
         sample_k = min(num_entry_points, len(self._all_known_ids))
-        candidates = random.sample(self._all_known_ids, sample_k)
+        rng = random.Random(random_seed) if random_seed is not None else random
+        candidates = rng.sample(self._all_known_ids, sample_k)
         explored: Set[Any] = set(candidates)
 
         # Min-heap to maintain top k items: (score, tie_breaker, point_id, payload)

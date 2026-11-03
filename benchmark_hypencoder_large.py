@@ -1,6 +1,6 @@
 """Compare Hypencoder and MiniLM with reproducible corpus-derived query probes.
 
-Builds at least 10,000 unique extractive queries from migrated Hypencoder passages,
+Builds at least 10,000 unique extractive queries from original corpus passages,
 labels each query with its source chunk, and reports retrieval/reranking metrics and
 latency. These probes support a large workload benchmark; they are not human-authored
 relevance judgments. Generates a GitHub Step Summary when running in Actions.
@@ -12,7 +12,6 @@ import json
 import os
 import random
 import re
-import statistics
 import time
 from typing import Any, Dict, List, Set, Tuple
 
@@ -20,6 +19,7 @@ from dotenv import load_dotenv
 import numpy as np
 from pymilvus import MilvusClient
 from qdrant_client import QdrantClient
+from qdrant_client import models as qdrant_models
 from sentence_transformers import CrossEncoder, SentenceTransformer
 import torch
 
@@ -27,6 +27,68 @@ from hypencoder_retriever import HypencoderZillizGraphRetriever, load_hypencoder
 
 MINIMUM_QUERY_COUNT = 10_000
 QUERY_SCROLL_PAGE_SIZE = 1000
+METRIC_SUM_FIELDS = (
+    "candidate_recall",
+    "candidate_precision",
+    "reranked_recall",
+    "reranked_precision",
+    "mrr",
+)
+
+
+def _new_phase_state(latency_fields: List[str]) -> Dict[str, Any]:
+    return {
+        "completed_queries": 0,
+        "metric_sums": {key: 0.0 for key in METRIC_SUM_FIELDS},
+        "latency_sums": {key: 0.0 for key in latency_fields},
+    }
+
+
+def _record_query(
+    state: Dict[str, Any],
+    candidate_metrics: Tuple[float, float],
+    reranked_metrics: Tuple[float, float, float],
+    latencies_ms: Dict[str, float],
+) -> None:
+    candidate_precision, candidate_recall = candidate_metrics
+    reranked_precision, reranked_recall, reciprocal_rank = reranked_metrics
+    state["metric_sums"]["candidate_precision"] += candidate_precision
+    state["metric_sums"]["candidate_recall"] += candidate_recall
+    state["metric_sums"]["reranked_precision"] += reranked_precision
+    state["metric_sums"]["reranked_recall"] += reranked_recall
+    state["metric_sums"]["mrr"] += reciprocal_rank
+    for key, value in latencies_ms.items():
+        state["latency_sums"][key] += value
+    state["completed_queries"] += 1
+
+
+def _phase_summary(state: Dict[str, Any]) -> Dict[str, Any]:
+    count = int(state["completed_queries"])
+    if count < 1:
+        raise RuntimeError("Benchmark phase has no completed queries.")
+    return {
+        **{key: value / count for key, value in state["metric_sums"].items()},
+        "latency_ms": {key: value / count for key, value in state["latency_sums"].items()},
+        "queries_completed": count,
+    }
+
+
+def _query_seed(query: str) -> int:
+    return int.from_bytes(hashlib.sha256(query.encode("utf-8")).digest()[:8], "big")
+
+
+def _write_checkpoint(path: str, checkpoint: Dict[str, Any]) -> None:
+    checkpoint["partial_metrics"] = {
+        phase: _phase_summary(checkpoint[phase])
+        for phase in ("biencoder", "hypencoder")
+        if checkpoint.get(phase, {}).get("completed_queries", 0) > 0
+    }
+    temporary_path = f"{path}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as output:
+        json.dump(checkpoint, output)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary_path, path)
 
 
 def build_benchmark_queries(client, collection: str, query_count: int) -> List[Dict[str, Any]]:
@@ -111,71 +173,98 @@ def compute_metrics(ranked_ids: List[str], relevant_ids: Set[str], k: int) -> Tu
     return precision, recall, rr
 
 
-def evaluate_biencoder(client, collection, minilm, reranker, queries, candidate_k, final_k):
-    q_encode_ms, search_ms, rerank_ms, total_ms = [], [], [], []
-    cand_p_list, cand_r_list = [], []
-    final_p_list, final_r_list, mrr_list = [], [], []
-
-    for query_index, item in enumerate(queries, start=1):
-        query = item["query"]
-        relevant = set(item["relevant_ids"])
-
+def evaluate_biencoder(
+    client,
+    collection,
+    minilm,
+    reranker,
+    queries,
+    candidate_k,
+    final_k,
+    state,
+    batch_size,
+    save_checkpoint,
+):
+    for start in range(state["completed_queries"], len(queries), batch_size):
+        batch = queries[start : start + batch_size]
+        batch_count = len(batch)
         t0 = time.perf_counter()
-        query_vec = minilm.encode(query, normalize_embeddings=True)
+        query_vectors = minilm.encode(
+            [item["query"] for item in batch],
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
         t1 = time.perf_counter()
 
-        res = client.query_points(
-            collection_name=collection,
-            query=query_vec,
-            limit=candidate_k,
-            with_payload=True,
-            with_vectors=False,
-        )
+        requests = [
+            qdrant_models.QueryRequest(
+                query=vector.tolist(),
+                limit=candidate_k,
+                with_payload=True,
+            )
+            for vector in query_vectors
+        ]
+        responses = client.query_batch_points(collection_name=collection, requests=requests)
+        if len(responses) != batch_count:
+            raise RuntimeError(f"Qdrant returned {len(responses)} results for {batch_count} batched queries.")
         t2 = time.perf_counter()
 
-        points = getattr(res, "points", None) or res
-        cand_ids = [str((p.payload or {}).get("_stable_id") or p.id) for p in points]
-        cand_p, cand_r, _ = compute_metrics(cand_ids, relevant, candidate_k)
+        batch_candidates = []
+        all_pairs = []
+        pair_ranges = []
+        candidate_metrics = []
+        for item, response in zip(batch, responses):
+            points = getattr(response, "points", None) or []
+            relevant = set(item["relevant_ids"])
+            candidate_ids = [str((point.payload or {}).get("_stable_id") or point.id) for point in points]
+            cand_precision, cand_recall, _ = compute_metrics(candidate_ids, relevant, candidate_k)
+            candidate_metrics.append((cand_precision, cand_recall))
+            pair_start = len(all_pairs)
+            all_pairs.extend([[item["query"], (point.payload or {}).get("text", "")] for point in points])
+            pair_ranges.append((pair_start, len(all_pairs)))
+            batch_candidates.append(points)
 
-        pairs = [[query, (p.payload or {}).get("text", "")] for p in points]
-        scores = reranker.predict(pairs).tolist() if pairs else []
-        ranked_points = [p for p, _ in sorted(zip(points, scores), key=lambda x: x[1], reverse=True)]
+        scores = reranker.predict(all_pairs, batch_size=64, show_progress_bar=False).tolist() if all_pairs else []
         t3 = time.perf_counter()
+        encode_ms = (t1 - t0) * 1000 / batch_count
+        search_ms = (t2 - t1) * 1000 / batch_count
+        rerank_ms = (t3 - t2) * 1000 / batch_count
 
-        ranked_ids = [str((p.payload or {}).get("_stable_id") or p.id) for p in ranked_points]
-        final_p, final_r, rr = compute_metrics(ranked_ids, relevant, final_k)
-
-        q_encode_ms.append((t1 - t0) * 1000)
-        search_ms.append((t2 - t1) * 1000)
-        rerank_ms.append((t3 - t2) * 1000)
-        total_ms.append((t3 - t0) * 1000)
-
-        cand_p_list.append(cand_p)
-        cand_r_list.append(cand_r)
-        final_p_list.append(final_p)
-        final_r_list.append(final_r)
-        mrr_list.append(rr)
-
-        if query_index % 100 == 0 or query_index == len(queries):
-            print(
-                f"Bi-encoder queries: {query_index}/{len(queries)}; "
-                f"mean end-to-end {statistics.mean(total_ms):.1f} ms/query",
-                flush=True,
+        for item, points, (cand_precision, cand_recall), (pair_start, pair_end) in zip(
+            batch, batch_candidates, candidate_metrics, pair_ranges
+        ):
+            point_scores = scores[pair_start:pair_end]
+            ranked_points = [
+                point
+                for point, _ in sorted(zip(points, point_scores), key=lambda candidate: candidate[1], reverse=True)
+            ]
+            ranked_ids = [str((point.payload or {}).get("_stable_id") or point.id) for point in ranked_points]
+            final_precision, final_recall, reciprocal_rank = compute_metrics(
+                ranked_ids, set(item["relevant_ids"]), final_k
+            )
+            _record_query(
+                state,
+                (cand_precision, cand_recall),
+                (final_precision, final_recall, reciprocal_rank),
+                {
+                    "query_encoding": encode_ms,
+                    "search": search_ms,
+                    "rerank": rerank_ms,
+                    "total": encode_ms + search_ms + rerank_ms,
+                },
             )
 
-    return {
-        "candidate_recall": statistics.mean(cand_r_list),
-        "candidate_precision": statistics.mean(cand_p_list),
-        "reranked_recall": statistics.mean(final_r_list),
-        "reranked_precision": statistics.mean(final_p_list),
-        "mrr": statistics.mean(mrr_list),
-        "latency_ms": {
-            "query_encoding": statistics.mean(q_encode_ms),
-            "search": statistics.mean(search_ms),
-            "rerank": statistics.mean(rerank_ms),
-            "total": statistics.mean(total_ms),
-        },
-    }
+        save_checkpoint(state)
+        summary = _phase_summary(state)
+        print(
+            f"Bi-encoder queries: {state['completed_queries']}/{len(queries)}; "
+            f"batch-amortized mean end-to-end {summary['latency_ms']['total']:.1f} ms/query",
+            flush=True,
+        )
+
+    return _phase_summary(state)
 
 
 def evaluate_hypencoder(
@@ -187,65 +276,81 @@ def evaluate_hypencoder(
     entry_points=12,
     expansion_candidates=10,
     max_iter=4,
+    state=None,
+    batch_size=64,
+    save_checkpoint=None,
 ):
-    traversal_ms, rerank_ms, total_ms = [], [], []
-    cand_p_list, cand_r_list = [], []
-    final_p_list, final_r_list, mrr_list = [], [], []
+    if state is None:
+        state = _new_phase_state(["query_encoding_and_traversal", "rerank", "total"])
+    if save_checkpoint is None:
+        save_checkpoint = lambda _: None
 
-    for query_index, item in enumerate(queries, start=1):
-        query = item["query"]
-        relevant = set(item["relevant_ids"])
+    for start in range(state["completed_queries"], len(queries), batch_size):
+        batch = queries[start : start + batch_size]
+        batch_candidates = []
+        traversal_times = []
+        candidate_metrics = []
+        all_pairs = []
+        pair_ranges = []
 
-        t0 = time.perf_counter()
-        candidates = retriever.retrieve(
-            query=query,
-            k=candidate_k,
-            num_entry_points=min(entry_points, len(retriever._all_known_ids)),
-            ncandidates=expansion_candidates,
-            max_iter=max_iter,
-        )
-        t1 = time.perf_counter()
+        for item in batch:
+            query = item["query"]
+            t0 = time.perf_counter()
+            candidates = retriever.retrieve(
+                query=query,
+                k=candidate_k,
+                num_entry_points=min(entry_points, len(retriever._all_known_ids)),
+                ncandidates=expansion_candidates,
+                max_iter=max_iter,
+                random_seed=_query_seed(query),
+            )
+            traversal_times.append((time.perf_counter() - t0) * 1000)
+            cand_ids = [str(candidate.get("id")) for candidate in candidates]
+            cand_precision, cand_recall, _ = compute_metrics(
+                cand_ids, set(item["relevant_ids"]), candidate_k
+            )
+            candidate_metrics.append((cand_precision, cand_recall))
+            pair_start = len(all_pairs)
+            all_pairs.extend([[query, candidate.get("text", "")] for candidate in candidates])
+            pair_ranges.append((pair_start, len(all_pairs)))
+            batch_candidates.append(candidates)
 
-        cand_ids = [str(c.get("id")) for c in candidates]
-        cand_p, cand_r, _ = compute_metrics(cand_ids, relevant, candidate_k)
+        rerank_started = time.perf_counter()
+        scores = reranker.predict(all_pairs, batch_size=64, show_progress_bar=False).tolist() if all_pairs else []
+        rerank_ms = (time.perf_counter() - rerank_started) * 1000 / len(batch)
 
-        pairs = [[query, c.get("text", "")] for c in candidates]
-        scores = reranker.predict(pairs).tolist() if pairs else []
-        ranked_cands = [c for c, _ in sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)]
-        t2 = time.perf_counter()
-
-        ranked_ids = [str(c.get("id")) for c in ranked_cands]
-        final_p, final_r, rr = compute_metrics(ranked_ids, relevant, final_k)
-
-        traversal_ms.append((t1 - t0) * 1000)
-        rerank_ms.append((t2 - t1) * 1000)
-        total_ms.append((t2 - t0) * 1000)
-
-        cand_p_list.append(cand_p)
-        cand_r_list.append(cand_r)
-        final_p_list.append(final_p)
-        final_r_list.append(final_r)
-        mrr_list.append(rr)
-
-        if query_index % 100 == 0 or query_index == len(queries):
-            print(
-                f"Hypencoder queries: {query_index}/{len(queries)}; "
-                f"mean traversal {statistics.mean(traversal_ms):.1f} ms/query",
-                flush=True,
+        for item, candidates, (cand_precision, cand_recall), (pair_start, pair_end), traversal_ms in zip(
+            batch, batch_candidates, candidate_metrics, pair_ranges, traversal_times
+        ):
+            point_scores = scores[pair_start:pair_end]
+            ranked_candidates = [
+                candidate
+                for candidate, _ in sorted(zip(candidates, point_scores), key=lambda row: row[1], reverse=True)
+            ]
+            ranked_ids = [str(candidate.get("id")) for candidate in ranked_candidates]
+            final_precision, final_recall, reciprocal_rank = compute_metrics(
+                ranked_ids, set(item["relevant_ids"]), final_k
+            )
+            _record_query(
+                state,
+                (cand_precision, cand_recall),
+                (final_precision, final_recall, reciprocal_rank),
+                {
+                    "query_encoding_and_traversal": traversal_ms,
+                    "rerank": rerank_ms,
+                    "total": traversal_ms + rerank_ms,
+                },
             )
 
-    return {
-        "candidate_recall": statistics.mean(cand_r_list),
-        "candidate_precision": statistics.mean(cand_p_list),
-        "reranked_recall": statistics.mean(final_r_list),
-        "reranked_precision": statistics.mean(final_p_list),
-        "mrr": statistics.mean(mrr_list),
-        "latency_ms": {
-            "query_encoding_and_traversal": statistics.mean(traversal_ms),
-            "rerank": statistics.mean(rerank_ms),
-            "total": statistics.mean(total_ms),
-        },
-    }
+        save_checkpoint(state)
+        summary = _phase_summary(state)
+        print(
+            f"Hypencoder queries: {state['completed_queries']}/{len(queries)}; "
+            f"mean traversal {summary['latency_ms']['query_encoding_and_traversal']:.1f} ms/query",
+            flush=True,
+        )
+
+    return _phase_summary(state)
 
 
 def main():
@@ -268,6 +373,9 @@ def main():
     )
     parser.add_argument("--max-iter", type=int, default=4, help="Hypencoder graph traversal iterations (default: 4)")
     parser.add_argument("--output-json", default="benchmark_results.json", help="Path to save results JSON")
+    parser.add_argument("--checkpoint-json", default="benchmark_checkpoint.json")
+    parser.add_argument("--evaluation-batch-size", type=int, default=64)
+    parser.add_argument("--resume", action="store_true", help="Resume from a compatible checkpoint")
     args = parser.parse_args()
     if args.query_count < MINIMUM_QUERY_COUNT:
         parser.error(f"--query-count must be at least {MINIMUM_QUERY_COUNT}")
@@ -275,6 +383,8 @@ def main():
         parser.error("--candidate-k and --final-k must be positive")
     if args.entry_points < 1 or args.expansion_candidates < 1 or args.max_iter < 1:
         parser.error("--entry-points, --expansion-candidates, and --max-iter must be positive")
+    if args.evaluation_batch_size < 1:
+        parser.error("--evaluation-batch-size must be positive")
 
     url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY")
@@ -322,9 +432,54 @@ def main():
     ).hexdigest()
     print(f"Built {len(queries):,} unique corpus-derived queries.")
 
+    checkpoint_config = {
+        "schema_version": 1,
+        "query_set_sha256": query_set_sha256,
+        "query_count": len(queries),
+        "source_count": src_count,
+        "hypencoder_count": hyp_count,
+        "candidate_k": args.candidate_k,
+        "final_k": args.final_k,
+        "entry_points": args.entry_points,
+        "expansion_candidates": args.expansion_candidates,
+        "max_iter": args.max_iter,
+        "evaluation_batch_size": args.evaluation_batch_size,
+    }
+    if args.resume and os.path.exists(args.checkpoint_json):
+        with open(args.checkpoint_json, encoding="utf-8") as checkpoint_file:
+            checkpoint_data = json.load(checkpoint_file)
+        if checkpoint_data.get("config") != checkpoint_config:
+            raise RuntimeError(
+                "Benchmark checkpoint settings or query corpus do not match this run; "
+                "use a fresh checkpoint file or restore the matching inputs."
+            )
+        print("Resuming compatible benchmark checkpoint.", flush=True)
+    else:
+        checkpoint_data = {"config": checkpoint_config}
+
+    biencoder_state = checkpoint_data.get("biencoder") or _new_phase_state(
+        ["query_encoding", "search", "rerank", "total"]
+    )
+    hypencoder_state = checkpoint_data.get("hypencoder") or _new_phase_state(
+        ["query_encoding_and_traversal", "rerank", "total"]
+    )
+
+    def save_phase(phase_name):
+        def save(state):
+            checkpoint_data[phase_name] = state
+            checkpoint_data["status"] = "in_progress"
+            checkpoint_data["updated_at_unix"] = time.time()
+            _write_checkpoint(args.checkpoint_json, checkpoint_data)
+
+        return save
+
+    _write_checkpoint(args.checkpoint_json, checkpoint_data)
+
+    need_biencoder = biencoder_state["completed_queries"] < len(queries)
+    need_hypencoder = hypencoder_state["completed_queries"] < len(queries)
     print("\nLoading models for benchmark...")
-    reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-    minilm = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2") if need_biencoder or need_hypencoder else None
+    minilm = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2") if need_biencoder else None
 
     print("\n--- Evaluating Bi-Encoder (MiniLM) on Qdrant ---")
     bi_res = evaluate_biencoder(
@@ -335,6 +490,9 @@ def main():
         queries=queries,
         candidate_k=args.candidate_k,
         final_k=args.final_k,
+        state=biencoder_state,
+        batch_size=args.evaluation_batch_size,
+        save_checkpoint=save_phase("biencoder"),
     )
 
     print("\n--- Evaluating Hypencoder (q-net + Graph Traversal) ---")
@@ -344,27 +502,33 @@ def main():
         f"{args.max_iter} iterations",
         flush=True,
     )
-    model, tokenizer = load_hypencoder()
-    random.seed(0)
-    np.random.seed(0)
-    torch.manual_seed(0)
-    retriever = HypencoderZillizGraphRetriever(
-        client=milvus,
-        collection_name=hyp_coll,
-        model=model,
-        tokenizer=tokenizer,
-        preload_limit=10000,
-    )
-    hyp_res = evaluate_hypencoder(
-        retriever=retriever,
-        reranker=reranker,
-        queries=queries,
-        candidate_k=args.candidate_k,
-        final_k=args.final_k,
-        entry_points=args.entry_points,
-        expansion_candidates=args.expansion_candidates,
-        max_iter=args.max_iter,
-    )
+    if need_hypencoder:
+        model, tokenizer = load_hypencoder()
+        random.seed(0)
+        np.random.seed(0)
+        torch.manual_seed(0)
+        retriever = HypencoderZillizGraphRetriever(
+            client=milvus,
+            collection_name=hyp_coll,
+            model=model,
+            tokenizer=tokenizer,
+            preload_limit=10000,
+        )
+        hyp_res = evaluate_hypencoder(
+            retriever=retriever,
+            reranker=reranker,
+            queries=queries,
+            candidate_k=args.candidate_k,
+            final_k=args.final_k,
+            entry_points=args.entry_points,
+            expansion_candidates=args.expansion_candidates,
+            max_iter=args.max_iter,
+            state=hypencoder_state,
+            batch_size=args.evaluation_batch_size,
+            save_checkpoint=save_phase("hypencoder"),
+        )
+    else:
+        hyp_res = _phase_summary(hypencoder_state)
 
     summary_md = f"""# 🚀 End-to-End Retrieval Benchmark Results
 
@@ -375,6 +539,8 @@ def main():
 - **Candidate Pool ($K$):** `{args.candidate_k}`
 - **Final Reranked Context ($K$):** `{args.final_k}`
 - **Hypencoder traversal budget:** `{args.entry_points}` entry points, `{args.expansion_candidates}` expansion candidates, `{args.max_iter}` iterations
+- **Evaluation batch size:** `{args.evaluation_batch_size}` queries
+- **Latency interpretation:** Batch-amortized mean ms/query; graph traversal is measured per query
 
 ### 📊 Metric Comparison
 
@@ -386,7 +552,7 @@ def main():
 | **Reranked Precision@{args.final_k}** | `{bi_res['reranked_precision']:.4f}` | **`{hyp_res['reranked_precision']:.4f}`** | **{hyp_res['reranked_precision'] - bi_res['reranked_precision']:+.4f}** |
 | **MRR (Mean Reciprocal Rank)** | `{bi_res['mrr']:.4f}` | **`{hyp_res['mrr']:.4f}`** | **{hyp_res['mrr'] - bi_res['mrr']:+.4f}** |
 
-### ⏱️ Latency (ms)
+### ⏱️ Batch-amortized Latency (ms/query)
 
 | Phase | Bi-Encoder (MiniLM + Qdrant) | Hypencoder (q-net + Graph) |
 | :--- | :---: | :---: |
@@ -399,9 +565,12 @@ def main():
 
     # Save outputs
     output_data = {
+        "status": "complete",
         "query_count": len(queries),
         "query_type": "corpus-derived extractive probes; one positive source chunk per query",
         "query_set_sha256": query_set_sha256,
+        "evaluation_batch_size": args.evaluation_batch_size,
+        "latency_interpretation": "Bi-encoder components and reranking are batch-amortized mean ms/query; Hypencoder traversal is measured per query.",
         "hypencoder_random_seed": 0,
         "hypencoder_traversal": {
             "entry_points": args.entry_points,
@@ -417,6 +586,11 @@ def main():
     }
     with open(args.output_json, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
+    checkpoint_data["biencoder"] = biencoder_state
+    checkpoint_data["hypencoder"] = hypencoder_state
+    checkpoint_data["status"] = "complete"
+    checkpoint_data["updated_at_unix"] = time.time()
+    _write_checkpoint(args.checkpoint_json, checkpoint_data)
     print(f"Saved benchmark results to {args.output_json}")
 
     # Output to GITHUB_STEP_SUMMARY if running in GitHub Actions
