@@ -4,17 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       query_count:
-        description: "Number of distinct corpus-derived benchmark queries (minimum 10000)"
+        description: "Distinct corpus-derived queries to benchmark (10,000–200,000)"
         required: true
-        default: "10000"
+        default: "200000"
+        type: string
       candidate_k:
         description: "Candidate pool size (K)"
         required: true
         default: "20"
+        type: string
       final_k:
         description: "Final reranked pool size (K)"
         required: true
         default: "5"
+        type: string
       hypencoder_collection:
         description: "Zilliz collection built by the fresh Hypencoder Zilliz workflow"
         required: true
@@ -43,98 +46,101 @@ concurrency:
   group: hypencoder-benchmark
   cancel-in-progress: false
 
+env:
+  PYTHON_VERSION: "3.13"
+  SHARD_SIZE: "2000"
+
 jobs:
-  benchmark:
+  prepare_queries:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    outputs:
+      matrix: ${{ steps.make_matrix.outputs.matrix }}
     env:
+      QUERY_COUNT: ${{ inputs.query_count }}
+      CANDIDATE_K: ${{ inputs.candidate_k }}
+      FINAL_K: ${{ inputs.final_k }}
+      ENTRY_POINTS: ${{ inputs.entry_points }}
+      EXPANSION_CANDIDATES: ${{ inputs.expansion_candidates }}
+      MAX_ITER: ${{ inputs.max_iter }}
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
       QDRANT_COLLECTION: document_chunks
-      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
-      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
-      ZILLIZ_COLLECTION_HYPENCODER: ${{ inputs.hypencoder_collection }}
-      HF_HOME: ${{ github.workspace }}/.hf_cache
-
     steps:
       - name: Check out benchmark code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Restore Hugging Face Cache
-        uses: actions/cache@v4
-        with:
-          path: .hf_cache
-          key: hypencoder-hf-ubuntu-x64-v1
-          restore-keys: |
-            hypencoder-hf-ubuntu-x64-
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "torch>=2.0" "transformers>=4.48" "sentence-transformers>=6.1.0" "qdrant-client>=1.15,<1.17" "pymilvus>=2.4,<3" python-dotenv tqdm numpy
-
-      - name: Validate Qdrant secret and query count
+      - name: Validate inputs and required secrets
         shell: bash
-        env:
-          QUERY_COUNT: ${{ inputs.query_count }}
-          ENTRY_POINTS: ${{ inputs.entry_points }}
-          EXPANSION_CANDIDATES: ${{ inputs.expansion_candidates }}
-          MAX_ITER: ${{ inputs.max_iter }}
         run: |
           set -euo pipefail
           [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
-          [[ -n "$ZILLIZ_URI" ]] || { echo "ZILLIZ_URI secret is required" >&2; exit 1; }
-          [[ -n "$ZILLIZ_TOKEN" ]] || { echo "ZILLIZ_TOKEN secret is required" >&2; exit 1; }
           [[ "$QUERY_COUNT" =~ ^[0-9]+$ ]] || { echo "query_count must be an integer" >&2; exit 1; }
-          (( QUERY_COUNT >= 10000 )) || { echo "query_count must be at least 10000" >&2; exit 1; }
+          (( QUERY_COUNT >= 10000 && QUERY_COUNT <= 200000 )) || {
+            echo "query_count must be between 10000 and 200000" >&2; exit 1;
+          }
+          if ! [[ "$CANDIDATE_K" =~ ^[0-9]+$ ]] || (( CANDIDATE_K <= 0 )); then
+            echo "candidate_k must be a positive integer" >&2; exit 1;
+          fi
+          if ! [[ "$FINAL_K" =~ ^[0-9]+$ ]] || (( FINAL_K <= 0 || FINAL_K > CANDIDATE_K )); then
+            echo "final_k must be positive and no greater than candidate_k" >&2; exit 1;
+          fi
           for value in "$ENTRY_POINTS" "$EXPANSION_CANDIDATES" "$MAX_ITER"; do
             if ! [[ "$value" =~ ^[0-9]+$ ]] || (( value <= 0 )); then
-              echo "traversal settings must be positive integers" >&2
-              exit 1
+              echo "traversal settings must be positive integers" >&2; exit 1;
             fi
           done
 
-      - name: Run end-to-end benchmark
-        env:
-          QUERY_COUNT: ${{ inputs.query_count }}
-          CANDIDATE_K: ${{ inputs.candidate_k }}
-          FINAL_K: ${{ inputs.final_k }}
-          ENTRY_POINTS: ${{ inputs.entry_points }}
-          EXPANSION_CANDIDATES: ${{ inputs.expansion_candidates }}
-          MAX_ITER: ${{ inputs.max_iter }}
-        run: |
-          python benchmark_hypencoder_large.py \
-            --query-count "$QUERY_COUNT" \
-            --candidate-k "$CANDIDATE_K" \
-            --final-k "$FINAL_K" \
-            --entry-points "$ENTRY_POINTS" \
-            --expansion-candidates "$EXPANSION_CANDIDATES" \
-            --max-iter "$MAX_ITER" \
-            --evaluation-batch-size 64 \
-            --checkpoint-json benchmark_checkpoint.json \
-            --resume
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
-      - name: Upload benchmark checkpoint and results
-        if: always()
+      - name: Install preparation dependencies
+        run: python -m pip install --upgrade pip "qdrant-client>=1.15,<1.17" python-dotenv
+
+      - name: Build deterministic full query set
+        run: python prepare_hypencoder_benchmark_queries.py --query-count "$QUERY_COUNT"
+
+      - name: Build shard matrix
+        id: make_matrix
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          total = int(os.environ["QUERY_COUNT"])
+          size = int(os.environ["SHARD_SIZE"])
+          shards = [
+              {"index": index, "start": start, "count": min(size, total - start)}
+              for index, start in enumerate(range(0, total, size))
+          ]
+          print("matrix=" + json.dumps({"include": shards}, separators=(",", ":")))
+          PY
+
+      - name: Upload prepared query set
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-checkpoint-initial
-          path: |
-            benchmark_checkpoint.json
-            benchmark_results.json
-          if-no-files-found: ignore
+          name: benchmark-query-probes
+          path: benchmark_queries.json
+          if-no-files-found: error
+          retention-days: 5
 
-  resume_after_timeout:
-    needs: benchmark
-    if: ${{ always() && (needs.benchmark.result == 'failure' || needs.benchmark.result == 'cancelled') }}
+  benchmark_shards:
+    needs: prepare_queries
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJSON(needs.prepare_queries.outputs.matrix) }}
     env:
+      QUERY_COUNT: ${{ inputs.query_count }}
+      CANDIDATE_K: ${{ inputs.candidate_k }}
+      FINAL_K: ${{ inputs.final_k }}
+      ENTRY_POINTS: ${{ inputs.entry_points }}
+      EXPANSION_CANDIDATES: ${{ inputs.expansion_candidates }}
+      MAX_ITER: ${{ inputs.max_iter }}
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
       QDRANT_COLLECTION: document_chunks
@@ -149,54 +155,172 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
-      - name: Restore Hugging Face Cache
+      - name: Restore Hugging Face model cache
         uses: actions/cache@v4
         with:
           path: .hf_cache
-          key: hypencoder-hf-ubuntu-x64-v1
-          restore-keys: |
-            hypencoder-hf-ubuntu-x64-
+          key: hypencoder-hf-ubuntu-x64-v2
+          restore-keys: hypencoder-hf-ubuntu-x64-
 
-      - name: Install dependencies
+      - name: Install benchmark dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install "torch>=2.0" "transformers>=4.48" "sentence-transformers>=6.1.0" "qdrant-client>=1.15,<1.17" "pymilvus>=2.4,<3" python-dotenv tqdm numpy
 
-      - name: Download prior benchmark checkpoint
+      - name: Download prepared query set
         uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
-          name: benchmark-checkpoint-initial
+          name: benchmark-query-probes
           path: .
 
-      - name: Resume end-to-end benchmark
-        env:
-          QUERY_COUNT: ${{ inputs.query_count }}
-          CANDIDATE_K: ${{ inputs.candidate_k }}
-          FINAL_K: ${{ inputs.final_k }}
-          ENTRY_POINTS: ${{ inputs.entry_points }}
-          EXPANSION_CANDIDATES: ${{ inputs.expansion_candidates }}
-          MAX_ITER: ${{ inputs.max_iter }}
+      - name: Run benchmark shard
         run: |
-          python benchmark_hypencoder_large.py \
+          timeout --signal=INT --kill-after=3m 320m python benchmark_hypencoder_large.py \
             --query-count "$QUERY_COUNT" \
+            --queries-json benchmark_queries.json \
+            --query-start "${{ matrix.start }}" \
+            --query-limit "${{ matrix.count }}" \
+            --shard-index "${{ matrix.index }}" \
             --candidate-k "$CANDIDATE_K" \
             --final-k "$FINAL_K" \
             --entry-points "$ENTRY_POINTS" \
             --expansion-candidates "$EXPANSION_CANDIDATES" \
             --max-iter "$MAX_ITER" \
             --evaluation-batch-size 64 \
-            --checkpoint-json benchmark_checkpoint.json \
+            --checkpoint-json "benchmark_checkpoint_${{ matrix.index }}.json" \
+            --output-json "benchmark_results_${{ matrix.index }}_initial.json" \
             --resume
 
-      - name: Upload resumed benchmark checkpoint and results
+      - name: Upload shard checkpoint and result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-checkpoint-resume
+          name: benchmark-shard-initial-${{ matrix.index }}
           path: |
-            benchmark_checkpoint.json
-            benchmark_results.json
+            benchmark_checkpoint_${{ matrix.index }}.json
+            benchmark_results_${{ matrix.index }}_initial.json
           if-no-files-found: ignore
+          retention-days: 5
+
+  resume_after_failure:
+    needs: [prepare_queries, benchmark_shards]
+    if: ${{ always() && needs.prepare_queries.result == 'success' && (needs.benchmark_shards.result == 'failure' || needs.benchmark_shards.result == 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJSON(needs.prepare_queries.outputs.matrix) }}
+    env:
+      QUERY_COUNT: ${{ inputs.query_count }}
+      CANDIDATE_K: ${{ inputs.candidate_k }}
+      FINAL_K: ${{ inputs.final_k }}
+      ENTRY_POINTS: ${{ inputs.entry_points }}
+      EXPANSION_CANDIDATES: ${{ inputs.expansion_candidates }}
+      MAX_ITER: ${{ inputs.max_iter }}
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
+      ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
+      ZILLIZ_COLLECTION_HYPENCODER: ${{ inputs.hypencoder_collection }}
+      HF_HOME: ${{ github.workspace }}/.hf_cache
+    steps:
+      - name: Check out benchmark code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Restore Hugging Face model cache
+        uses: actions/cache@v4
+        with:
+          path: .hf_cache
+          key: hypencoder-hf-ubuntu-x64-v2
+          restore-keys: hypencoder-hf-ubuntu-x64-
+
+      - name: Install benchmark dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "torch>=2.0" "transformers>=4.48" "sentence-transformers>=6.1.0" "qdrant-client>=1.15,<1.17" "pymilvus>=2.4,<3" python-dotenv tqdm numpy
+
+      - name: Download prepared query set
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-query-probes
+          path: .
+
+      - name: Download initial shard checkpoint when available
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: benchmark-shard-initial-${{ matrix.index }}
+          path: .
+
+      - name: Resume benchmark shard
+        run: |
+          timeout --signal=INT --kill-after=3m 320m python benchmark_hypencoder_large.py \
+            --query-count "$QUERY_COUNT" \
+            --queries-json benchmark_queries.json \
+            --query-start "${{ matrix.start }}" \
+            --query-limit "${{ matrix.count }}" \
+            --shard-index "${{ matrix.index }}" \
+            --candidate-k "$CANDIDATE_K" \
+            --final-k "$FINAL_K" \
+            --entry-points "$ENTRY_POINTS" \
+            --expansion-candidates "$EXPANSION_CANDIDATES" \
+            --max-iter "$MAX_ITER" \
+            --evaluation-batch-size 64 \
+            --checkpoint-json "benchmark_checkpoint_${{ matrix.index }}.json" \
+            --output-json "benchmark_results_${{ matrix.index }}_resume.json" \
+            --resume
+
+      - name: Upload resumed shard checkpoint and result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-shard-resume-${{ matrix.index }}
+          path: |
+            benchmark_checkpoint_${{ matrix.index }}.json
+            benchmark_results_${{ matrix.index }}_resume.json
+          if-no-files-found: ignore
+          retention-days: 5
+
+  aggregate:
+    needs: [prepare_queries, benchmark_shards, resume_after_failure]
+    if: ${{ always() && needs.prepare_queries.result == 'success' && (needs.benchmark_shards.result == 'success' || needs.resume_after_failure.result == 'success') }}
+    runs-on: ubuntu-latest
+    env:
+      QUERY_COUNT: ${{ inputs.query_count }}
+    steps:
+      - name: Check out benchmark code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-shard-*
+          path: benchmark-shards
+          merge-multiple: false
+
+      - name: Aggregate complete benchmark metrics
+        run: python aggregate_hypencoder_benchmark.py --results-dir benchmark-shards --query-count "$QUERY_COUNT"
+
+      - name: Upload full benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: benchmark_results.json
+          if-no-files-found: error
+          retention-days: 30

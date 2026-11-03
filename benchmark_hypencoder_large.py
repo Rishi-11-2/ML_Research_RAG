@@ -12,20 +12,15 @@ import json
 import os
 import random
 import re
+import signal
+import sys
 import time
 from typing import Any, Dict, List, Set, Tuple
 
 from dotenv import load_dotenv
-import numpy as np
-from pymilvus import MilvusClient
-from qdrant_client import QdrantClient
-from qdrant_client import models as qdrant_models
-from sentence_transformers import CrossEncoder, SentenceTransformer
-import torch
-
-from hypencoder_retriever import HypencoderZillizGraphRetriever, load_hypencoder
 
 MINIMUM_QUERY_COUNT = 10_000
+MAXIMUM_QUERY_COUNT = 200_000
 QUERY_SCROLL_PAGE_SIZE = 1000
 METRIC_SUM_FIELDS = (
     "candidate_recall",
@@ -34,6 +29,21 @@ METRIC_SUM_FIELDS = (
     "reranked_precision",
     "mrr",
 )
+_STOP_REQUESTED = False
+
+
+class GracefulStop(Exception):
+    """Raised after the current batch is checkpointed following a timeout signal."""
+
+
+def _request_graceful_stop(_signum, _frame) -> None:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+
+
+def _raise_if_stop_requested() -> None:
+    if _STOP_REQUESTED:
+        raise GracefulStop("time budget reached; saved checkpoint for automatic continuation")
 
 
 def _new_phase_state(latency_fields: List[str]) -> Dict[str, Any]:
@@ -75,6 +85,14 @@ def _phase_summary(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def _query_seed(query: str) -> int:
     return int.from_bytes(hashlib.sha256(query.encode("utf-8")).digest()[:8], "big")
+
+
+def _hash_query_set(queries: List[Dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for query in queries:
+        digest.update(json.dumps(query, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _write_checkpoint(path: str, checkpoint: Dict[str, Any]) -> None:
@@ -185,7 +203,10 @@ def evaluate_biencoder(
     batch_size,
     save_checkpoint,
 ):
+    from qdrant_client import models as qdrant_models
+
     for start in range(state["completed_queries"], len(queries), batch_size):
+        _raise_if_stop_requested()
         batch = queries[start : start + batch_size]
         batch_count = len(batch)
         t0 = time.perf_counter()
@@ -257,6 +278,7 @@ def evaluate_biencoder(
             )
 
         save_checkpoint(state)
+        _raise_if_stop_requested()
         summary = _phase_summary(state)
         print(
             f"Bi-encoder queries: {state['completed_queries']}/{len(queries)}; "
@@ -286,6 +308,7 @@ def evaluate_hypencoder(
         save_checkpoint = lambda _: None
 
     for start in range(state["completed_queries"], len(queries), batch_size):
+        _raise_if_stop_requested()
         batch = queries[start : start + batch_size]
         batch_candidates = []
         traversal_times = []
@@ -343,6 +366,7 @@ def evaluate_hypencoder(
             )
 
         save_checkpoint(state)
+        _raise_if_stop_requested()
         summary = _phase_summary(state)
         print(
             f"Hypencoder queries: {state['completed_queries']}/{len(queries)}; "
@@ -355,6 +379,16 @@ def evaluate_hypencoder(
 
 def main():
     load_dotenv()
+    import numpy as np
+    import torch
+    from pymilvus import MilvusClient
+    from qdrant_client import QdrantClient
+    from sentence_transformers import CrossEncoder, SentenceTransformer
+    from hypencoder_retriever import HypencoderZillizGraphRetriever, load_hypencoder
+
+    signal.signal(signal.SIGINT, _request_graceful_stop)
+    signal.signal(signal.SIGTERM, _request_graceful_stop)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate-k", type=int, default=20, help="Candidate pool size (default: 20)")
     parser.add_argument("--final-k", type=int, default=5, help="Final reranked pool size (default: 5)")
@@ -375,16 +409,26 @@ def main():
     parser.add_argument("--output-json", default="benchmark_results.json", help="Path to save results JSON")
     parser.add_argument("--checkpoint-json", default="benchmark_checkpoint.json")
     parser.add_argument("--evaluation-batch-size", type=int, default=64)
+    parser.add_argument("--queries-json", help="Prepared full query set JSON file")
+    parser.add_argument("--query-start", type=int, default=0, help="First query index for this shard")
+    parser.add_argument("--query-limit", type=int, help="Number of queries assigned to this shard")
+    parser.add_argument("--shard-index", type=int, help="Optional workflow matrix shard index")
     parser.add_argument("--resume", action="store_true", help="Resume from a compatible checkpoint")
     args = parser.parse_args()
     if args.query_count < MINIMUM_QUERY_COUNT:
         parser.error(f"--query-count must be at least {MINIMUM_QUERY_COUNT}")
+    if args.query_count > MAXIMUM_QUERY_COUNT:
+        parser.error(f"--query-count cannot exceed {MAXIMUM_QUERY_COUNT}")
     if args.candidate_k < 1 or args.final_k < 1:
         parser.error("--candidate-k and --final-k must be positive")
     if args.entry_points < 1 or args.expansion_candidates < 1 or args.max_iter < 1:
         parser.error("--entry-points, --expansion-candidates, and --max-iter must be positive")
     if args.evaluation_batch_size < 1:
         parser.error("--evaluation-batch-size must be positive")
+    if args.query_start < 0 or (args.query_limit is not None and args.query_limit < 1):
+        parser.error("--query-start must be nonnegative and --query-limit must be positive")
+    if args.shard_index is not None and args.shard_index < 0:
+        parser.error("--shard-index must be nonnegative")
 
     url = os.getenv("QDRANT_URL")
     api_key = os.getenv("QDRANT_API_KEY")
@@ -422,20 +466,48 @@ def main():
         milvus.close()
         raise RuntimeError(f"Need at least {args.query_count} Zilliz Hypencoder points; found {hyp_count}.")
 
-    print(f"\nBuilding {args.query_count:,} deterministic query probes from Hypencoder passages...")
-    queries = build_benchmark_queries(client, src_coll, args.query_count)
-    query_set_sha256 = hashlib.sha256(
-        "\n".join(
-            json.dumps(query, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            for query in queries
-        ).encode("utf-8")
-    ).hexdigest()
-    print(f"Built {len(queries):,} unique corpus-derived queries.")
+    if args.queries_json:
+        with open(args.queries_json, encoding="utf-8") as queries_file:
+            query_bundle = json.load(queries_file)
+        if query_bundle.get("schema_version") != 1:
+            raise RuntimeError("Prepared query file has an unsupported schema version.")
+        if query_bundle.get("source_collection") != src_coll:
+            raise RuntimeError("Prepared query file was built from a different Qdrant source collection.")
+        full_queries = query_bundle.get("queries")
+        if not isinstance(full_queries, list) or len(full_queries) != args.query_count:
+            raise RuntimeError(
+                f"Prepared query file must contain exactly {args.query_count:,} probes."
+            )
+        if query_bundle.get("query_count") != args.query_count:
+            raise RuntimeError("Prepared query file query_count metadata does not match this run.")
+        if query_bundle.get("source_count") != src_count:
+            raise RuntimeError("Prepared query file was built from a different Qdrant source corpus count.")
+        full_query_set_sha256 = query_bundle.get("query_set_sha256") or _hash_query_set(full_queries)
+    else:
+        print(f"\nBuilding {args.query_count:,} deterministic query probes from Qdrant passages...")
+        full_queries = build_benchmark_queries(client, src_coll, args.query_count)
+        full_query_set_sha256 = _hash_query_set(full_queries)
+    query_end = args.query_start + (args.query_limit if args.query_limit is not None else args.query_count)
+    if query_end > len(full_queries):
+        raise RuntimeError(f"Query shard [{args.query_start}, {query_end}) exceeds the {len(full_queries)} probes.")
+    queries = full_queries[args.query_start:query_end]
+    if not queries:
+        raise RuntimeError("This benchmark shard contains no queries.")
+    query_set_sha256 = _hash_query_set(queries)
+    print(
+        f"Evaluating queries {args.query_start + 1:,}-{query_end:,} of {args.query_count:,}; "
+        f"query-set SHA-256={query_set_sha256}",
+        flush=True,
+    )
 
     checkpoint_config = {
         "schema_version": 1,
         "query_set_sha256": query_set_sha256,
+        "full_query_set_sha256": full_query_set_sha256,
+        "query_start": args.query_start,
         "query_count": len(queries),
+        "total_query_count": args.query_count,
+        "shard_index": args.shard_index,
         "source_count": src_count,
         "hypencoder_count": hyp_count,
         "candidate_k": args.candidate_k,
@@ -481,59 +553,69 @@ def main():
     reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2") if need_biencoder or need_hypencoder else None
     minilm = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2") if need_biencoder else None
 
-    print("\n--- Evaluating Bi-Encoder (MiniLM) on Qdrant ---")
-    bi_res = evaluate_biencoder(
-        client=client,
-        collection=src_coll,
-        minilm=minilm,
-        reranker=reranker,
-        queries=queries,
-        candidate_k=args.candidate_k,
-        final_k=args.final_k,
-        state=biencoder_state,
-        batch_size=args.evaluation_batch_size,
-        save_checkpoint=save_phase("biencoder"),
-    )
-
-    print("\n--- Evaluating Hypencoder (q-net + Graph Traversal) ---")
-    print(
-        "Traversal budget: "
-        f"{args.entry_points} entry points, {args.expansion_candidates} expansion candidates, "
-        f"{args.max_iter} iterations",
-        flush=True,
-    )
-    if need_hypencoder:
-        model, tokenizer = load_hypencoder()
-        random.seed(0)
-        np.random.seed(0)
-        torch.manual_seed(0)
-        retriever = HypencoderZillizGraphRetriever(
-            client=milvus,
-            collection_name=hyp_coll,
-            model=model,
-            tokenizer=tokenizer,
-            preload_limit=10000,
-        )
-        hyp_res = evaluate_hypencoder(
-            retriever=retriever,
+    try:
+        print("\n--- Evaluating Bi-Encoder (MiniLM) on Qdrant ---")
+        bi_res = evaluate_biencoder(
+            client=client,
+            collection=src_coll,
+            minilm=minilm,
             reranker=reranker,
             queries=queries,
             candidate_k=args.candidate_k,
             final_k=args.final_k,
-            entry_points=args.entry_points,
-            expansion_candidates=args.expansion_candidates,
-            max_iter=args.max_iter,
-            state=hypencoder_state,
+            state=biencoder_state,
             batch_size=args.evaluation_batch_size,
-            save_checkpoint=save_phase("hypencoder"),
+            save_checkpoint=save_phase("biencoder"),
         )
-    else:
-        hyp_res = _phase_summary(hypencoder_state)
+
+        print("\n--- Evaluating Hypencoder (q-net + Graph Traversal) ---")
+        print(
+            "Traversal budget: "
+            f"{args.entry_points} entry points, {args.expansion_candidates} expansion candidates, "
+            f"{args.max_iter} iterations",
+            flush=True,
+        )
+        if need_hypencoder:
+            model, tokenizer = load_hypencoder()
+            random.seed(0)
+            np.random.seed(0)
+            torch.manual_seed(0)
+            retriever = HypencoderZillizGraphRetriever(
+                client=milvus,
+                collection_name=hyp_coll,
+                model=model,
+                tokenizer=tokenizer,
+                preload_limit=10000,
+            )
+            hyp_res = evaluate_hypencoder(
+                retriever=retriever,
+                reranker=reranker,
+                queries=queries,
+                candidate_k=args.candidate_k,
+                final_k=args.final_k,
+                entry_points=args.entry_points,
+                expansion_candidates=args.expansion_candidates,
+                max_iter=args.max_iter,
+                state=hypencoder_state,
+                batch_size=args.evaluation_batch_size,
+                save_checkpoint=save_phase("hypencoder"),
+            )
+        else:
+            hyp_res = _phase_summary(hypencoder_state)
+    except GracefulStop as exc:
+        checkpoint_data["biencoder"] = biencoder_state
+        checkpoint_data["hypencoder"] = hypencoder_state
+        checkpoint_data["status"] = "interrupted"
+        checkpoint_data["updated_at_unix"] = time.time()
+        _write_checkpoint(args.checkpoint_json, checkpoint_data)
+        milvus.close()
+        print(f"Benchmark shard paused cleanly: {exc}", flush=True)
+        return 75
 
     summary_md = f"""# 🚀 End-to-End Retrieval Benchmark Results
 
 - **Corpus evaluated:** `{hyp_count}` Hypencoder chunks vs `{src_count}` source chunks
-- **Test queries:** `{len(queries):,}` reproducible corpus-derived probes (one positive source chunk each)
+- **Test queries:** `{len(queries):,}` of `{args.query_count:,}` reproducible corpus-derived probes (one positive source chunk each)
 - **Query type:** Extractive synthetic probes for retrieval/load benchmarking; not human-authored QA judgments
 - **Query set SHA-256:** `{query_set_sha256}`
 - **Candidate Pool ($K$):** `{args.candidate_k}`
@@ -567,8 +649,12 @@ def main():
     output_data = {
         "status": "complete",
         "query_count": len(queries),
+        "total_query_count": args.query_count,
+        "query_start": args.query_start,
+        "shard_index": args.shard_index,
         "query_type": "corpus-derived extractive probes; one positive source chunk per query",
         "query_set_sha256": query_set_sha256,
+        "full_query_set_sha256": full_query_set_sha256,
         "evaluation_batch_size": args.evaluation_batch_size,
         "latency_interpretation": "Bi-encoder components and reranking are batch-amortized mean ms/query; Hypencoder traversal is measured per query.",
         "hypencoder_random_seed": 0,
@@ -606,4 +692,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
