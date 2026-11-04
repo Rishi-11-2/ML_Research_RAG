@@ -19,9 +19,9 @@ on:
         default: 16
         type: number
       search_batch_size:
-        description: "Zilliz graph search batch size"
+        description: "Vectors per Zilliz graph search request (maximum 10)"
         required: true
-        default: 64
+        default: 10
         type: number
       delete_legacy_qdrant_hypencoder:
         description: "Delete document_chunks_hypencoder from Qdrant only after Zilliz validation succeeds"
@@ -94,7 +94,11 @@ jobs:
             exit 1
           fi
           if ! [[ "$SEARCH_BATCH_SIZE" =~ ^[0-9]+$ ]] || (( SEARCH_BATCH_SIZE <= 0 )); then
-            echo "search_batch_size must be positive" >&2
+            echo "search_batch_size must be a positive integer" >&2
+            exit 1
+          fi
+          if (( SEARCH_BATCH_SIZE > 10 )); then
+            echo "search_batch_size cannot exceed 10 because Zilliz/Milvus limits nq to 10" >&2
             exit 1
           fi
           echo "The build reads document text from QDRANT_COLLECTION and creates fresh Hypencoder vectors; it does not read the legacy Hypencoder vectors."

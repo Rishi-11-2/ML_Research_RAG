@@ -24,6 +24,7 @@ PAPER_PASSAGE_MAX_LENGTH = 196
 GRAPH_BUILD_FIELD = "hypencoder_graph_build_id"
 BUILD_ID_FIELD = "hypencoder_build_id"
 ENTRY_POINT_FIELD = "hypencoder_entry_point"
+MAX_MILVUS_SEARCH_NQ = 10
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-degree", type=int, default=100)
     parser.add_argument("--scroll-page-size", type=int, default=256)
     parser.add_argument("--embedding-batch-size", type=int, default=16)
-    parser.add_argument("--search-batch-size", type=int, default=64)
+    parser.add_argument("--search-batch-size", type=int, default=MAX_MILVUS_SEARCH_NQ)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--device", default=None)
     parser.add_argument("--report", default="hypencoder_zilliz_build_report.json")
@@ -427,6 +428,11 @@ def main() -> int:
     args = parse_args()
     if min(args.graph_degree, args.scroll_page_size, args.embedding_batch_size, args.search_batch_size) < 1:
         raise RuntimeError("Graph degree and batch sizes must be positive integers.")
+    if args.search_batch_size > MAX_MILVUS_SEARCH_NQ:
+        raise RuntimeError(
+            f"--search-batch-size cannot exceed {MAX_MILVUS_SEARCH_NQ}; "
+            "the Zilliz/Milvus search API limits each request to 10 vectors."
+        )
 
     qdrant_url = os.getenv("QDRANT_URL")
     qdrant_key = os.getenv("QDRANT_API_KEY")
