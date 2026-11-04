@@ -92,11 +92,22 @@ def _milvus_row(point: Any, vector: Sequence[float], build_id: str) -> Dict[str,
 
 
 def _collection_count(client: MilvusClient, collection: str) -> int:
-    stats = client.get_collection_stats(collection_name=collection)
+    # get_collection_stats().row_count is segment metadata and can include rows
+    # replaced by graph upserts until compaction. Validate the live collection
+    # with count(*) so a successful resume is not rejected for stale statistics.
+    client.load_collection(collection_name=collection)
+    result = client.query(
+        collection_name=collection,
+        filter="",
+        output_fields=["count(*)"],
+        consistency_level="Strong",
+    )
+    if not result:
+        return 0
     try:
-        return int(stats["row_count"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError(f"Zilliz did not return a usable row_count for {collection!r}: {stats}") from exc
+        return int(result[0]["count(*)"])
+    except (IndexError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Zilliz did not return an exact count for {collection!r}: {result}") from exc
 
 
 def _existing_ids_for_build(
