@@ -164,8 +164,6 @@ EOF
 
 Replace the example IDs with judged relevant chunk IDs. The evaluator reports candidate Recall@50 and Precision@50, reranked Recall@5 and Precision@5, and mean/median/p95 latency split across embedding, Qdrant search, and reranking. It only reads the collections. Since the MiniLM collection was deleted, run with `--only eg2`; comparing both models requires recreating the MiniLM collection. For a meaningful production-quality evaluation, label at least 50 representative questions and pool relevant IDs across both models' top results before scoring.
 
-The **Benchmark EmbeddingGemma 2 vs MiniLM** GitHub Actions workflow was used while both collections existed. The legacy MiniLM collection has since been deleted, so that comparison workflow requires the MiniLM collection to be recreated before it can run again. Its synthetic passage-derived probes are useful for repeatable load comparisons, but human-judged questions are needed to measure production QA relevance.
-
 ### Hypencoder benchmark
 
 The **Benchmark Hypencoder vs Bi-Encoder** workflow assumes the Hypencoder collection is already built in Zilliz; it does not run migration or graph construction. It supports 10,000–200,000 deterministic passage-derived probes from the original Qdrant document collection, each labeled with its source chunk. The full query set is prepared once, then evaluated in 2,000-query shards (100 jobs for 200,000 probes) so a single GitHub-hosted job does not need to process the full run. These synthetic probes are useful for retrieval/load comparison, not human-authored QA accuracy.
