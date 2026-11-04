@@ -147,7 +147,7 @@ EmbeddingGemma 2 uses a different vector space from MiniLM. Existing Qdrant vect
 3. Run `./ML_Research_RAG/bin/python migrate_embeddinggemma2.py` and wait for the final verified count. The migration requires each source point to have a non-empty `text` payload and an unnamed dense vector collection. If interrupted, rerun with `--resume`; it skips destination points whose IDs, payloads, and vector shape are already valid, then verifies the exact source/destination ID sets. The source remains untouched.
 4. After validating retrieval, set `EMBEDDING_MODEL=google/embeddinggemma-2` in the app environment. This selects the new collection. Keep the existing `QDRANT_COLLECTION` unchanged as the rollback path.
 
-The GitHub Actions workflow can also migrate the data on a six-hour schedule. It checks Qdrant first and skips model loading/embedding once source and destination IDs match. It uses the standard hosted `ubuntu-latest` runner. Add `QDRANT_URL` as a repository secret; add `QDRANT_API_KEY` if the Qdrant endpoint requires it. The workflow defaults to `document_chunks` as the source collection and `document_chunks_embeddinggemma2` as the destination. It automatically starts a second hosted job to resume if a migration job hits its six-hour limit. Ubuntu uses CPU inference, so migration may run slower than on a GPU-equipped machine. The status check still runs every six hours after migration completes; for private repositories, standard Actions minutes are subject to your plan's allowance and billing.
+The EmbeddingGemma 2 collection has already been migrated and verified. The migration workflow has been removed; the migration script remains available for an explicitly requested future migration.
 
 The app uses the model's text and code encoder and 256-dimensional normalized vectors to reduce Qdrant storage and search work. Queries use the `SearchQuery` prompt and corpus chunks use `Document`, as required for asymmetric retrieval. The original MiniLM collection remains available. The separate ingestion service must also write new documents with EmbeddingGemma 2 before switching the app, or newly ingested papers will not appear in the new collection. The venv needs sentence-transformers 6.1 or later for this model; that release line conflicts with the `docling`/`datasets` dependency versions currently present in the same venv, so check `pip check` before using the upgraded environment for other ingestion work.
 
@@ -163,6 +163,8 @@ EOF
 ```
 
 Replace the example IDs with judged relevant chunk IDs. After migration, run the same dataset with `--only eg2` (or omit `--only` to run both). The evaluator reports candidate Recall@50 and Precision@50, reranked Recall@5 and Precision@5, and mean/median/p95 latency split across embedding, Qdrant search, and reranking. It only reads the collections. For a meaningful comparison, label at least 50 representative questions and pool relevant IDs across both models' top results before scoring.
+
+The **Benchmark EmbeddingGemma 2 vs MiniLM** GitHub Actions workflow prepares deterministic corpus-derived probes and compares both verified collections. It defaults to 1,000 probes, reports candidate/reranked precision and recall plus mean, median, and p95 latency, and uploads the query set and JSON metrics. These synthetic passage-derived probes are useful for repeatable load comparisons, but human-judged questions are needed to measure production QA relevance.
 
 ### Hypencoder benchmark
 

@@ -171,7 +171,7 @@ def build_benchmark_queries(client, collection: str, query_count: int) -> List[D
     if len(queries) < query_count:
         raise RuntimeError(
             f"Requested {query_count} unique queries but built only {len(queries)} from {collection!r}. "
-            "Increase the Hypencoder collection size or check that its points have text and stable IDs."
+            "Increase the source collection size or check that its points have text and stable IDs."
         )
     return queries
 

@@ -1,0 +1,119 @@
+name: Benchmark EmbeddingGemma 2 vs MiniLM
+
+on:
+  workflow_dispatch:
+    inputs:
+      query_count:
+        description: "Number of deterministic corpus-derived probes (100–10000)"
+        required: true
+        default: 1000
+        type: number
+      candidate_k:
+        description: "Candidate pool size before reranking"
+        required: true
+        default: 50
+        type: number
+      final_k:
+        description: "Final reranked result count"
+        required: true
+        default: 5
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: embedding-model-benchmark
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_EG2: document_chunks_embeddinggemma2
+      HF_HOME: ${{ github.workspace }}/.hf_cache
+      QUERY_COUNT: ${{ inputs.query_count }}
+      CANDIDATE_K: ${{ inputs.candidate_k }}
+      FINAL_K: ${{ inputs.final_k }}
+    steps:
+      - name: Check out benchmark code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore model cache
+        uses: actions/cache@v4
+        with:
+          path: .hf_cache
+          key: embedding-retrieval-models-ubuntu-x64-v1
+          restore-keys: embedding-retrieval-models-ubuntu-x64-
+
+      - name: Create project virtual environment
+        run: python -m venv ML_Research_RAG
+
+      - name: Install benchmark dependencies
+        run: |
+          ./ML_Research_RAG/bin/python -m pip install --upgrade pip
+          ./ML_Research_RAG/bin/python -m pip install \
+            "sentence-transformers>=6.1.0" \
+            "qdrant-client>=1.15,<1.17" \
+            python-dotenv numpy pillow torchvision
+
+      - name: Validate inputs and secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$QDRANT_URL" ]] || { echo "QDRANT_URL secret is required" >&2; exit 1; }
+          if ! [[ "$QUERY_COUNT" =~ ^[0-9]+$ ]] || (( QUERY_COUNT < 100 || QUERY_COUNT > 10000 )); then
+            echo "query_count must be between 100 and 10000" >&2
+            exit 1
+          fi
+          if ! [[ "$CANDIDATE_K" =~ ^[0-9]+$ ]] || (( CANDIDATE_K < 1 || CANDIDATE_K > 1000 )); then
+            echo "candidate_k must be between 1 and 1000" >&2
+            exit 1
+          fi
+          if ! [[ "$FINAL_K" =~ ^[0-9]+$ ]] || (( FINAL_K < 1 || FINAL_K > CANDIDATE_K )); then
+            echo "final_k must be positive and no greater than candidate_k" >&2
+            exit 1
+          fi
+
+      - name: Verify MiniLM and EmbeddingGemma 2 collections match
+        run: |
+          status="$(./ML_Research_RAG/bin/python check_migration_status.py)"
+          [[ "$status" == "true" ]] || {
+            echo "The EmbeddingGemma 2 collection is not complete or does not match the MiniLM source collection." >&2
+            exit 1
+          }
+
+      - name: Prepare deterministic benchmark probes
+        run: >-
+          ./ML_Research_RAG/bin/python prepare_embedding_benchmark_queries.py
+          --query-count "$QUERY_COUNT"
+          --output embedding_benchmark_queries.jsonl
+
+      - name: Compare retrieval quality and latency
+        run: >-
+          ./ML_Research_RAG/bin/python evaluate_retrieval.py
+          embedding_benchmark_queries.jsonl
+          --candidate-k "$CANDIDATE_K"
+          --final-k "$FINAL_K"
+          --minilm-collection "$QDRANT_COLLECTION"
+          --eg2-collection "$QDRANT_COLLECTION_EG2"
+          --output-json embedding_retrieval_benchmark.json
+
+      - name: Upload benchmark metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedding-retrieval-benchmark-${{ github.run_id }}
+          path: |
+            embedding_retrieval_benchmark.json
+          if-no-files-found: ignore
+          retention-days: 30
