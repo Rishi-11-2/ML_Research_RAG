@@ -145,7 +145,7 @@ EmbeddingGemma 2 uses a different vector space from MiniLM. Existing Qdrant vect
 1. Upgrade the project environment from this directory: `./ML_Research_RAG/bin/python -m pip install -r requirements.txt`.
 2. Set `QDRANT_COLLECTION_EG2` to a new collection name if the default `<QDRANT_COLLECTION>_embeddinggemma2` is unsuitable.
 3. Run `./ML_Research_RAG/bin/python migrate_embeddinggemma2.py` and wait for the final verified count. The migration requires each source point to have a non-empty `text` payload and an unnamed dense vector collection. If interrupted, rerun with `--resume`; it skips destination points whose IDs, payloads, and vector shape are already valid, then verifies the exact source/destination ID sets. The source remains untouched.
-4. The RAG app now defaults to `EMBEDDING_MODEL=google/embeddinggemma-2` and selects `QDRANT_COLLECTION_EG2`. The MiniLM collection is only needed for rollback or direct MiniLM comparisons.
+4. The RAG app now defaults to `EMBEDDING_MODEL=google/embeddinggemma-2` and selects `QDRANT_COLLECTION_EG2`. After migration was verified, the old MiniLM collection `document_chunks` was deleted; rollback or another MiniLM comparison requires rebuilding it from the original source documents.
 
 The EmbeddingGemma 2 collection has already been migrated and verified. The migration workflow has been removed; the migration script remains available for an explicitly requested future migration.
 
@@ -159,12 +159,12 @@ Precision and recall require relevance labels; vector similarity scores alone ca
 cat > labeled_queries.jsonl <<'EOF'
 {"query":"What is U-Net?","relevant_ids":["exact_stable_chunk_id_1","exact_stable_chunk_id_2"]}
 EOF
-./ML_Research_RAG/bin/python evaluate_retrieval.py labeled_queries.jsonl --only minilm
+./ML_Research_RAG/bin/python evaluate_retrieval.py labeled_queries.jsonl --only eg2
 ```
 
-Replace the example IDs with judged relevant chunk IDs. After migration, run the same dataset with `--only eg2` (or omit `--only` to run both). The evaluator reports candidate Recall@50 and Precision@50, reranked Recall@5 and Precision@5, and mean/median/p95 latency split across embedding, Qdrant search, and reranking. It only reads the collections. For a meaningful comparison, label at least 50 representative questions and pool relevant IDs across both models' top results before scoring.
+Replace the example IDs with judged relevant chunk IDs. The evaluator reports candidate Recall@50 and Precision@50, reranked Recall@5 and Precision@5, and mean/median/p95 latency split across embedding, Qdrant search, and reranking. It only reads the collections. Since the MiniLM collection was deleted, run with `--only eg2`; comparing both models requires recreating the MiniLM collection. For a meaningful production-quality evaluation, label at least 50 representative questions and pool relevant IDs across both models' top results before scoring.
 
-The **Benchmark EmbeddingGemma 2 vs MiniLM** GitHub Actions workflow prepares deterministic corpus-derived probes and compares both verified collections. It defaults to 1,000 probes, reports candidate/reranked precision and recall plus mean, median, and p95 latency, and uploads JSON metrics. These synthetic passage-derived probes are useful for repeatable load comparisons, but human-judged questions are needed to measure production QA relevance. This comparison requires the legacy MiniLM collection to exist.
+The **Benchmark EmbeddingGemma 2 vs MiniLM** GitHub Actions workflow was used while both collections existed. The legacy MiniLM collection has since been deleted, so that comparison workflow requires the MiniLM collection to be recreated before it can run again. Its synthetic passage-derived probes are useful for repeatable load comparisons, but human-judged questions are needed to measure production QA relevance.
 
 ### Hypencoder benchmark
 
