@@ -75,7 +75,7 @@ graph TD
 
 ### 3. Core RAG Logic (`RAG.py`)
 - **Retrieval:**
-    - **Embedding:** Defaults to `sentence-transformers/all-MiniLM-L6-v2`. After migrating the Qdrant data, it can use Google's local `google/embeddinggemma-2` model.
+    - **Embedding:** Defaults to Google's local `google/embeddinggemma-2` model and the `document_chunks_embeddinggemma2` Qdrant collection.
     - **Vector DB:** Queries **Qdrant** to find the most relevant document chunks.
 - **Reranking:**
     - **Cross-Encoder:** Uses `cross-encoder/ms-marco-MiniLM-L-6-v2` to re-score the initial candidates. This step significantly improves accuracy by analyzing the deep semantic relationship between the query and the documents.
@@ -145,11 +145,11 @@ EmbeddingGemma 2 uses a different vector space from MiniLM. Existing Qdrant vect
 1. Upgrade the project environment from this directory: `./ML_Research_RAG/bin/python -m pip install -r requirements.txt`.
 2. Set `QDRANT_COLLECTION_EG2` to a new collection name if the default `<QDRANT_COLLECTION>_embeddinggemma2` is unsuitable.
 3. Run `./ML_Research_RAG/bin/python migrate_embeddinggemma2.py` and wait for the final verified count. The migration requires each source point to have a non-empty `text` payload and an unnamed dense vector collection. If interrupted, rerun with `--resume`; it skips destination points whose IDs, payloads, and vector shape are already valid, then verifies the exact source/destination ID sets. The source remains untouched.
-4. After validating retrieval, set `EMBEDDING_MODEL=google/embeddinggemma-2` in the app environment. This selects the new collection. Keep the existing `QDRANT_COLLECTION` unchanged as the rollback path.
+4. The RAG app now defaults to `EMBEDDING_MODEL=google/embeddinggemma-2` and selects `QDRANT_COLLECTION_EG2`. The MiniLM collection is only needed for rollback or direct MiniLM comparisons.
 
 The EmbeddingGemma 2 collection has already been migrated and verified. The migration workflow has been removed; the migration script remains available for an explicitly requested future migration.
 
-The app uses the model's text and code encoder and 256-dimensional normalized vectors to reduce Qdrant storage and search work. Queries use the `SearchQuery` prompt and corpus chunks use `Document`, as required for asymmetric retrieval. The original MiniLM collection remains available. The separate ingestion service must also write new documents with EmbeddingGemma 2 before switching the app, or newly ingested papers will not appear in the new collection. The venv needs sentence-transformers 6.1 or later for this model; that release line conflicts with the `docling`/`datasets` dependency versions currently present in the same venv, so check `pip check` before using the upgraded environment for other ingestion work.
+The app uses the model's text and code encoder and 256-dimensional normalized vectors to reduce Qdrant storage and search work. Queries use the `SearchQuery` prompt and corpus chunks use `Document`, as required for asymmetric retrieval. The separate ingestion service must also write new documents with EmbeddingGemma 2 before they appear in the active collection. The venv needs sentence-transformers 6.1 or later for this model; that release line conflicts with the `docling`/`datasets` dependency versions currently present in the same venv, so check `pip check` before using the upgraded environment for other ingestion work.
 
 ### Retrieval evaluation
 
@@ -164,7 +164,7 @@ EOF
 
 Replace the example IDs with judged relevant chunk IDs. After migration, run the same dataset with `--only eg2` (or omit `--only` to run both). The evaluator reports candidate Recall@50 and Precision@50, reranked Recall@5 and Precision@5, and mean/median/p95 latency split across embedding, Qdrant search, and reranking. It only reads the collections. For a meaningful comparison, label at least 50 representative questions and pool relevant IDs across both models' top results before scoring.
 
-The **Benchmark EmbeddingGemma 2 vs MiniLM** GitHub Actions workflow prepares deterministic corpus-derived probes and compares both verified collections. It defaults to 1,000 probes, reports candidate/reranked precision and recall plus mean, median, and p95 latency, and uploads the query set and JSON metrics. These synthetic passage-derived probes are useful for repeatable load comparisons, but human-judged questions are needed to measure production QA relevance.
+The **Benchmark EmbeddingGemma 2 vs MiniLM** GitHub Actions workflow prepares deterministic corpus-derived probes and compares both verified collections. It defaults to 1,000 probes, reports candidate/reranked precision and recall plus mean, median, and p95 latency, and uploads JSON metrics. These synthetic passage-derived probes are useful for repeatable load comparisons, but human-judged questions are needed to measure production QA relevance. This comparison requires the legacy MiniLM collection to exist.
 
 ### Hypencoder benchmark
 

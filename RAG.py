@@ -15,7 +15,7 @@ load_dotenv()
 QDRANT_URL = os.environ.get("QDRANT_URL")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "document_chunks")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "google/embeddinggemma-2")
 RETRIEVER_BACKEND = os.getenv("RETRIEVER_BACKEND", "qdrant").strip().lower()
 EG2_COLLECTION = os.getenv("QDRANT_COLLECTION_EG2", f"{QDRANT_COLLECTION}_embeddinggemma2")
 ACTIVE_COLLECTION = EG2_COLLECTION if EMBEDDING_MODEL == "google/embeddinggemma-2" else QDRANT_COLLECTION
