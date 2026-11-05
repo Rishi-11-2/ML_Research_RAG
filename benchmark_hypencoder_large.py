@@ -24,7 +24,7 @@ MAXIMUM_QUERY_COUNT = 200_000
 QUERY_SCROLL_PAGE_SIZE = 1000
 BIENCODER_MODEL_ID = "google/embeddinggemma-2"
 BIENCODER_DIMENSION = 256
-RERANKER_MODEL_ID = "cross-encoder/ettin-reranker-68m-v1"
+RERANKER_MODEL_ID = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 METRIC_SUM_FIELDS = (
     "candidate_recall",
     "candidate_precision",
