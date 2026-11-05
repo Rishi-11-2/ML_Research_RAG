@@ -65,7 +65,7 @@ jobs:
       MAX_ITER: ${{ inputs.max_iter }}
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_EG2: document_chunks_embeddinggemma2
     steps:
       - name: Check out benchmark code
         uses: actions/checkout@v4
@@ -143,7 +143,7 @@ jobs:
       MAX_ITER: ${{ inputs.max_iter }}
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_EG2: document_chunks_embeddinggemma2
       ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
       ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
       ZILLIZ_COLLECTION_HYPENCODER: ${{ inputs.hypencoder_collection }}
@@ -162,8 +162,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .hf_cache
-          key: hypencoder-hf-ubuntu-x64-v2
-          restore-keys: hypencoder-hf-ubuntu-x64-
+          key: hypencoder-gemma2-hf-ubuntu-x64-v1
+          restore-keys: |
+            hypencoder-gemma2-hf-ubuntu-x64-
+            hypencoder-hf-ubuntu-x64-v2
 
       - name: Install benchmark dependencies
         run: |
@@ -223,7 +225,7 @@ jobs:
       MAX_ITER: ${{ inputs.max_iter }}
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-      QDRANT_COLLECTION: document_chunks
+      QDRANT_COLLECTION_EG2: document_chunks_embeddinggemma2
       ZILLIZ_URI: ${{ secrets.ZILLIZ_URI }}
       ZILLIZ_TOKEN: ${{ secrets.ZILLIZ_TOKEN }}
       ZILLIZ_COLLECTION_HYPENCODER: ${{ inputs.hypencoder_collection }}
@@ -242,8 +244,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .hf_cache
-          key: hypencoder-hf-ubuntu-x64-v2
-          restore-keys: hypencoder-hf-ubuntu-x64-
+          key: hypencoder-gemma2-hf-ubuntu-x64-v1
+          restore-keys: |
+            hypencoder-gemma2-hf-ubuntu-x64-
+            hypencoder-hf-ubuntu-x64-v2
 
       - name: Install benchmark dependencies
         run: |

@@ -31,7 +31,9 @@ def main() -> int:
     api_key = os.getenv("QDRANT_API_KEY")
     if not url:
         raise RuntimeError("QDRANT_URL must be configured")
-    source_collection = args.source_collection or os.getenv("QDRANT_COLLECTION", "document_chunks")
+    source_collection = args.source_collection or os.getenv(
+        "QDRANT_COLLECTION_EG2", "document_chunks_embeddinggemma2"
+    )
     client = QdrantClient(
         url=url,
         api_key=api_key.strip() if api_key else None,

@@ -1,4 +1,4 @@
-"""Compare Hypencoder and MiniLM with reproducible corpus-derived query probes.
+"""Compare Hypencoder and EmbeddingGemma 2 with reproducible corpus-derived probes.
 
 Builds at least 10,000 unique extractive queries from original corpus passages,
 labels each query with its source chunk, and reports retrieval/reranking metrics and
@@ -22,6 +22,9 @@ from dotenv import load_dotenv
 MINIMUM_QUERY_COUNT = 10_000
 MAXIMUM_QUERY_COUNT = 200_000
 QUERY_SCROLL_PAGE_SIZE = 1000
+BIENCODER_MODEL_ID = "google/embeddinggemma-2"
+BIENCODER_DIMENSION = 256
+RERANKER_MODEL_ID = "cross-encoder/ettin-reranker-68m-v1"
 METRIC_SUM_FIELDS = (
     "candidate_recall",
     "candidate_precision",
@@ -194,7 +197,7 @@ def compute_metrics(ranked_ids: List[str], relevant_ids: Set[str], k: int) -> Tu
 def evaluate_biencoder(
     client,
     collection,
-    minilm,
+    embedder,
     reranker,
     queries,
     candidate_k,
@@ -210,10 +213,11 @@ def evaluate_biencoder(
         batch = queries[start : start + batch_size]
         batch_count = len(batch)
         t0 = time.perf_counter()
-        query_vectors = minilm.encode(
+        query_vectors = embedder.encode(
             [item["query"] for item in batch],
             batch_size=batch_size,
             convert_to_numpy=True,
+            prompt_name="SearchQuery",
             normalize_embeddings=True,
             show_progress_bar=False,
         )
@@ -439,11 +443,21 @@ def main():
     if not zilliz_uri or not zilliz_token:
         raise RuntimeError("ZILLIZ_URI and ZILLIZ_TOKEN must be configured")
 
-    src_coll = os.getenv("QDRANT_COLLECTION", "document_chunks")
+    src_coll = os.getenv("QDRANT_COLLECTION_EG2", "document_chunks_embeddinggemma2")
     hyp_coll = os.getenv("ZILLIZ_COLLECTION_HYPENCODER", "document_chunks_hypencoder_zilliz_v2")
 
     client = QdrantClient(url=url, api_key=api_key.strip() if api_key else None, timeout=60.0, prefer_grpc=False)
-    src_count = client.count(src_coll, exact=True).count if client.collection_exists(src_coll) else 0
+    if not client.collection_exists(src_coll):
+        raise RuntimeError(f"EmbeddingGemma 2 Qdrant collection {src_coll!r} does not exist")
+    source_vectors = client.get_collection(src_coll).config.params.vectors
+    if isinstance(source_vectors, dict):
+        raise RuntimeError(f"Expected a single unnamed vector in {src_coll!r}")
+    if source_vectors.size != BIENCODER_DIMENSION:
+        raise RuntimeError(
+            f"EmbeddingGemma 2 collection {src_coll!r} has {source_vectors.size} dimensions; "
+            f"the benchmark encoder is configured for {BIENCODER_DIMENSION}"
+        )
+    src_count = client.count(src_coll, exact=True).count
     milvus = MilvusClient(uri=zilliz_uri, token=zilliz_token)
     if not milvus.has_collection(hyp_coll):
         milvus.close()
@@ -510,6 +524,10 @@ def main():
         "shard_index": args.shard_index,
         "source_count": src_count,
         "hypencoder_count": hyp_count,
+        "biencoder_model": BIENCODER_MODEL_ID,
+        "biencoder_dimension": BIENCODER_DIMENSION,
+        "biencoder_collection": src_coll,
+        "reranker_model": RERANKER_MODEL_ID,
         "candidate_k": args.candidate_k,
         "final_k": args.final_k,
         "entry_points": args.entry_points,
@@ -550,15 +568,23 @@ def main():
     need_biencoder = biencoder_state["completed_queries"] < len(queries)
     need_hypencoder = hypencoder_state["completed_queries"] < len(queries)
     print("\nLoading models for benchmark...")
-    reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2") if need_biencoder or need_hypencoder else None
-    minilm = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2") if need_biencoder else None
+    reranker = CrossEncoder(RERANKER_MODEL_ID) if need_biencoder or need_hypencoder else None
+    gemma = (
+        SentenceTransformer(
+            BIENCODER_MODEL_ID,
+            config_kwargs={"vision_config": None, "audio_config": None},
+            truncate_dim=BIENCODER_DIMENSION,
+        )
+        if need_biencoder
+        else None
+    )
 
     try:
-        print("\n--- Evaluating Bi-Encoder (MiniLM) on Qdrant ---")
+        print(f"\n--- Evaluating Bi-Encoder ({BIENCODER_MODEL_ID}, {BIENCODER_DIMENSION}d) on Qdrant ---")
         bi_res = evaluate_biencoder(
             client=client,
             collection=src_coll,
-            minilm=minilm,
+            embedder=gemma,
             reranker=reranker,
             queries=queries,
             candidate_k=args.candidate_k,
@@ -615,6 +641,8 @@ def main():
     summary_md = f"""# 🚀 End-to-End Retrieval Benchmark Results
 
 - **Corpus evaluated:** `{hyp_count}` Hypencoder chunks vs `{src_count}` source chunks
+- **Bi-encoder:** `{BIENCODER_MODEL_ID}` ({BIENCODER_DIMENSION} dimensions) in `{src_coll}`
+- **Shared reranker:** `{RERANKER_MODEL_ID}`
 - **Test queries:** `{len(queries):,}` of `{args.query_count:,}` reproducible corpus-derived probes (one positive source chunk each)
 - **Query type:** Extractive synthetic probes for retrieval/load benchmarking; not human-authored QA judgments
 - **Query set SHA-256:** `{query_set_sha256}`
@@ -626,7 +654,7 @@ def main():
 
 ### 📊 Metric Comparison
 
-| Metric | Bi-Encoder (MiniLM) | Hypencoder (6-Layer q-net) | Gain / Delta |
+| Metric | Bi-Encoder (EmbeddingGemma 2) | Hypencoder (6-Layer q-net) | Gain / Delta |
 | :--- | :---: | :---: | :---: |
 | **Candidate Recall@{args.candidate_k}** | `{bi_res['candidate_recall']:.4f}` | **`{hyp_res['candidate_recall']:.4f}`** | **{hyp_res['candidate_recall'] - bi_res['candidate_recall']:+.4f}** |
 | **Candidate Precision@{args.candidate_k}** | `{bi_res['candidate_precision']:.4f}` | **`{hyp_res['candidate_precision']:.4f}`** | **{hyp_res['candidate_precision'] - bi_res['candidate_precision']:+.4f}** |
@@ -636,7 +664,7 @@ def main():
 
 ### ⏱️ Batch-amortized Latency (ms/query)
 
-| Phase | Bi-Encoder (MiniLM + Qdrant) | Hypencoder (q-net + Graph) |
+| Phase | Bi-Encoder (EmbeddingGemma 2 + Qdrant) | Hypencoder (q-net + Graph) |
 | :--- | :---: | :---: |
 | **Search / Traversal** | `{bi_res['latency_ms']['search']:.1f} ms` | **`{hyp_res['latency_ms']['query_encoding_and_traversal']:.1f} ms`** |
 | **Cross-Encoder Rerank** | `{bi_res['latency_ms']['rerank']:.1f} ms` | `{hyp_res['latency_ms']['rerank']:.1f} ms` |
@@ -667,6 +695,10 @@ def main():
         "final_k": args.final_k,
         "source_corpus_count": src_count,
         "hypencoder_corpus_count": hyp_count,
+        "biencoder_model": BIENCODER_MODEL_ID,
+        "biencoder_dimension": BIENCODER_DIMENSION,
+        "biencoder_collection": src_coll,
+        "reranker_model": RERANKER_MODEL_ID,
         "biencoder": bi_res,
         "hypencoder": hyp_res,
     }
